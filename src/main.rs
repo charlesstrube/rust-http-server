@@ -2,6 +2,11 @@ use std::io::Write;
 #[allow(unused_imports)]
 use std::net::TcpListener;
 
+use crate::http::response::Response;
+use crate::http::status::StatusCode;
+
+mod http;
+
 fn main() {
     // You can use print statements as follows for debugging, they'll be visible when running tests.
     println!("Logs from your program will appear here!");
@@ -13,7 +18,8 @@ fn main() {
     for stream in listener.incoming() {
         match stream {
             Ok(mut stream) => {
-                let result = stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n");
+                let response = Response::new(StatusCode::Ok, vec![], "".to_string());
+                let result = stream.write_all(&response.to_bytes());
                 if let Err(e) = result {
                     println!("error: {}", e);
                 }

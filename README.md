@@ -36,3 +36,25 @@ Note: This section is for stages 2 and beyond.
    the first time you run it. Subsequent runs will be fast.
 1. Run `codecrafters submit` to submit your solution to CodeCrafters. Test
    output will be streamed to your terminal.
+
+
+# infrastructure
+
+src/
+  ├── main.rs              // point d'entrée : lit la config, lance le serveur
+  ├── config.rs            // struct Config { directory: Option<PathBuf> }, parsée depuis les args
+  ├── http/
+  │   ├── mod.rs           // déclare les sous-modules et ré-exporte les types publics
+  │   ├── method.rs        // enum Method { Get, Post } + parsing depuis &str
+  │   ├── status.rs        // enum StatusCode { Ok, Created, NotFound, ... } -> code + texte
+  │   ├── headers.rs       // struct Headers : recherche insensible à la casse
+  │   ├── request.rs       // struct Request { method, path, version, headers, body } + parsing
+  │   └── response.rs      // struct Response { status, headers, body } + écriture en octets
+  ├── server/
+  │   ├── mod.rs           // fn run(config) : bind + boucle accept + un thread par connexion
+  │   └── connection.rs    // gère UNE connexion : lire -> router -> écrire (puis la boucle keep-alive)
+  └── handlers/
+      ├── mod.rs           // fn route(&Request, &Config) -> Response : aiguille selon méthode+ path
+      ├── echo.rs          // GET /echo/{str}
+      ├── user_agent.rs    // GET /user-agent
+      └── files.rs         // GET et POST /files/{name}
