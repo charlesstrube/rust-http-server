@@ -1,25 +1,38 @@
-use std::io::Write;
-#[allow(unused_imports)]
-use std::net::TcpListener;
-
-use crate::http::response::Response;
-use crate::http::status::StatusCode;
-
+mod handlers;
 mod http;
 
+use std::io::{BufRead, BufReader, Write};
+use std::net::TcpListener;
+use std::str::FromStr;
+
+use crate::handlers::route;
+use crate::http::request::Request;
+
 fn main() {
-    // You can use print statements as follows for debugging, they'll be visible when running tests.
-    println!("Logs from your program will appear here!");
-
-    // TODO: Uncomment the code below to pass the first stage
-    //
     let listener = TcpListener::bind("127.0.0.1:4221").unwrap();
-
     for stream in listener.incoming() {
         match stream {
             Ok(mut stream) => {
-                let response = Response::new(StatusCode::Ok, vec![], "".to_string());
+                let mut request_line = String::new();
+                let mut buffer = BufReader::new(&stream);
+
+                if let Err(err) = buffer.read_line(&mut request_line) {
+                    println!("error: {}", err);
+                    continue;
+                };
+
+                let request = match Request::from_str(request_line.as_str()) {
+                    Ok(request) => request,
+                    Err(err) => {
+                        println!("error: {}", err);
+                        continue;
+                    }
+                };
+
+                let response = route(&request);
+
                 let result = stream.write_all(&response.to_bytes());
+
                 if let Err(e) = result {
                     println!("error: {}", e);
                 }
