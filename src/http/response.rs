@@ -25,3 +25,35 @@ impl Response {
         formated.into_bytes()
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    fn empty(status: StatusCode) -> Response {
+        Response::new(status, vec![], String::new())
+    }
+
+    #[test]
+    fn exposes_status() {
+        assert_eq!(empty(StatusCode::NotFound).status(), &StatusCode::NotFound);
+    }
+
+    #[test]
+    fn serializes_200_status_line() {
+        assert_eq!(empty(StatusCode::Ok).to_bytes(), b"HTTP/1.1 200 OK\r\n\r\n");
+    }
+
+    #[test]
+    fn serializes_404_status_line() {
+        assert_eq!(
+            empty(StatusCode::NotFound).to_bytes(),
+            b"HTTP/1.1 404 Not Found\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn ends_with_empty_line() {
+        assert!(empty(StatusCode::Ok).to_bytes().ends_with(b"\r\n\r\n"));
+    }
+}

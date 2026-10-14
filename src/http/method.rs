@@ -37,3 +37,42 @@ impl TryFrom<&str> for Method {
         Self::try_from(value.to_string())
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn parses_get() {
+        assert!(matches!(Method::try_from("GET"), Ok(Method::Get)));
+    }
+
+    #[test]
+    fn parses_post() {
+        assert!(matches!(Method::try_from("POST"), Ok(Method::Post)));
+    }
+
+    #[test]
+    fn parses_from_owned_string() {
+        assert!(matches!(Method::try_from(String::from("GET")), Ok(Method::Get)));
+    }
+
+    #[test]
+    fn rejects_unknown_method() {
+        assert!(matches!(
+            Method::try_from("FOO"),
+            Err(ParseMethodError::UnknownValue(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_empty_method() {
+        assert!(Method::try_from("").is_err());
+    }
+
+    #[test]
+    fn displays_uppercase() {
+        assert_eq!(Method::Get.to_string(), "GET");
+        assert_eq!(Method::Post.to_string(), "POST");
+    }
+}
