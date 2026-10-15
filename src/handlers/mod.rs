@@ -1,6 +1,6 @@
 use crate::{
     handlers::echo::Echo,
-    http::{request::Request, response::Response, status::StatusCode},
+    http::{headers::Headers, request::Request, response::Response, status::StatusCode},
 };
 
 pub mod echo;
@@ -8,13 +8,15 @@ pub mod echo;
 pub fn route(request: &Request) -> Response {
     let path = request.path();
 
+    let headers = Headers::default();
+
     let response: Response = match path {
-        "/" => Response::new(StatusCode::Ok, vec![], String::new()),
+        "/" => Response::new(StatusCode::Ok, headers, String::new()),
         _ if path.starts_with("/echo/") => match Echo::try_from(path) {
             Ok(echo) => echo.into(),
-            Err(_) => Response::new(StatusCode::NotFound, vec![], String::new()),
+            Err(_) => Response::new(StatusCode::NotFound, headers, String::new()),
         },
-        _ => Response::new(StatusCode::NotFound, vec![], String::new()),
+        _ => Response::new(StatusCode::NotFound, headers, String::new()),
     };
 
     response
@@ -90,8 +92,8 @@ mod test {
     #[test]
     fn echo_matches_spec_bytes() {
         assert_eq!(
-            route_line("GET /echo/abc HTTP/1.1").to_write(),
-            b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 3\r\n\r\nabc"
+            String::from_utf8(route_line("GET /echo/abc HTTP/1.1").into_bytes()).unwrap(),
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 3\r\n\r\nabc"
         );
     }
 

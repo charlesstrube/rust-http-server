@@ -1,17 +1,20 @@
 use crate::http::HTTP_VERSION;
+use crate::http::headers::Headers;
 use crate::http::status::StatusCode;
 
 pub struct Response {
     status: StatusCode,
-    header: Vec<(String, String)>,
+    headers: Headers,
     body: String,
 }
 
 impl Response {
-    pub fn new(status: StatusCode, header: Vec<(String, String)>, body: String) -> Self {
+    pub fn new(status: StatusCode, mut headers: Headers, body: String) -> Self {
+        let len = body.len();
+        headers.set("Content-Length", &len.to_string());
         Self {
             status,
-            header,
+            headers,
             body,
         }
     }
@@ -20,37 +23,20 @@ impl Response {
         &self.status
     }
 
-    pub fn to_write(&self) -> Vec<u8> {
-        let content_type = match self.header("content-type") {
-            Some(value) => format!("\r\nContent-Type: {}", value),
-            None => String::new(),
-        };
-
-        let content_length = match self.header("content-length") {
-            Some(value) => format!("\r\nContent-Length: {}", value),
-            None => String::new(),
-        };
-
-        let formated = format!(
-            "{} {}{}{}\r\n\r\n{}",
+    pub fn into_bytes(self) -> Vec<u8> {
+        let formatted = format!(
+            "{} {}\r\n{}\r\n{}",
             HTTP_VERSION,
             self.status(),
-            content_type,
-            content_length,
+            self.headers,
             self.body
         );
 
-        formated.into_bytes()
+        formatted.into_bytes()
     }
 
-    pub fn header(&self, needle: &str) -> Option<&str> {
-        self.header.iter().find_map(|(key, value)| {
-            if key.eq_ignore_ascii_case(needle) {
-                Some(value.as_str())
-            } else {
-                None
-            }
-        })
+    pub fn header(&self, key: &str) -> Option<&str> {
+        self.headers.get(key)
     }
 
     pub fn body(&self) -> &str {
@@ -63,7 +49,12 @@ mod test {
     use super::*;
 
     fn empty(status: StatusCode) -> Response {
-        Response::new(status, vec![], String::new())
+        Response::new(status, Headers::default(), String::new())
+    }
+
+    // Compare as text so assertion failures show readable `\r\n` instead of byte arrays.
+    fn serialized(response: Response) -> String {
+        String::from_utf8(response.into_bytes()).unwrap()
     }
 
     #[test]
@@ -73,31 +64,31 @@ mod test {
 
     #[test]
     fn serializes_200_status_line() {
-        assert_eq!(empty(StatusCode::Ok).to_write(), b"HTTP/1.1 200 OK\r\n\r\n");
+        assert_eq!(
+            serialized(empty(StatusCode::Ok)),
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+        );
     }
 
     #[test]
     fn serializes_404_status_line() {
         assert_eq!(
-            empty(StatusCode::NotFound).to_write(),
-            b"HTTP/1.1 404 Not Found\r\n\r\n"
+            serialized(empty(StatusCode::NotFound)),
+            "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"
         );
     }
 
     #[test]
     fn ends_with_empty_line() {
-        assert!(empty(StatusCode::Ok).to_write().ends_with(b"\r\n\r\n"));
+        assert!(serialized(empty(StatusCode::Ok)).ends_with("\r\n\r\n"));
     }
 
     fn text_plain(body: &str) -> Response {
-        Response::new(
-            StatusCode::Ok,
-            vec![
-                ("Content-Type".into(), "text/plain".into()),
-                ("Content-Length".into(), body.len().to_string()),
-            ],
-            body.into(),
-        )
+        let mut headers = Headers::default();
+
+        headers.add("Content-Type", "text/plain");
+
+        Response::new(StatusCode::Ok, headers, body.into())
     }
 
     #[test]
@@ -124,16 +115,39 @@ mod test {
     #[test]
     fn serializes_headers_in_insertion_order() {
         assert_eq!(
-            text_plain("").to_write(),
-            b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 0\r\n\r\n"
+            serialized(text_plain("")),
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 0\r\n\r\n"
         );
+    }
+
+    // RFC 9112 §6.3: multiple Content-Length values make the message invalid.
+    #[test]
+    fn content_length_overrides_handler_value() {
+        let mut headers = Headers::default();
+        headers.add("Content-Length", "999");
+
+        let response = Response::new(StatusCode::Ok, headers, "abc".into());
+
+        assert_eq!(response.header("Content-Length"), Some("3"));
+        assert_eq!(
+            serialized(response),
+            "HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabc"
+        );
+    }
+
+    #[test]
+    fn serializing_twice_gives_same_output() {
+        let first = text_plain("abc").into_bytes();
+        let second = text_plain("abc").into_bytes();
+
+        assert_eq!(String::from_utf8(first), String::from_utf8(second));
     }
 
     #[test]
     fn serializes_body_after_empty_line() {
         assert_eq!(
-            text_plain("abc").to_write(),
-            b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 3\r\n\r\nabc"
+            serialized(text_plain("abc")),
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 3\r\n\r\nabc"
         );
     }
 }

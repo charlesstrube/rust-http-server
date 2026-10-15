@@ -1,4 +1,4 @@
-use crate::http::{response::Response, status::StatusCode};
+use crate::http::{headers::Headers, response::Response, status::StatusCode};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ParseEchoError {
@@ -8,12 +8,12 @@ pub enum ParseEchoError {
 
 pub struct Echo {
     body: String,
-    header: Vec<(String, String)>,
+    headers: Headers,
 }
 
 impl From<Echo> for Response {
     fn from(echo: Echo) -> Self {
-        Response::new(StatusCode::Ok, echo.header, echo.body)
+        Response::new(StatusCode::Ok, echo.headers, echo.body)
     }
 }
 
@@ -23,13 +23,14 @@ impl TryFrom<String> for Echo {
         let parsed = path.strip_prefix("/echo/");
 
         match parsed {
-            Some(content) => Ok(Self {
-                body: content.into(),
-                header: vec![
-                    ("Content-Type".into(), "text/plain".into()),
-                    ("Content-Length".into(), content.len().to_string()),
-                ],
-            }),
+            Some(content) => {
+                let mut headers = Headers::default();
+                headers.add("Content-Type", "text/plain");
+                Ok(Self {
+                    body: content.into(),
+                    headers,
+                })
+            }
             None => Err(ParseEchoError::NoContent),
         }
     }

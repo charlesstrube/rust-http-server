@@ -70,27 +70,27 @@ fn get(path: &str) -> String {
 #[test]
 fn root_responds_200() {
     let _server = Server::start();
-    assert_eq!(get("/"), "HTTP/1.1 200 OK\r\n\r\n");
+    assert_eq!(get("/"), "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
 }
 
 #[test]
 fn unknown_path_responds_404() {
     let _server = Server::start();
-    assert_eq!(get("/abcdefg"), "HTTP/1.1 404 Not Found\r\n\r\n");
+    assert_eq!(get("/abcdefg"), "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
 }
 
 #[test]
 fn request_line_only_is_enough() {
     let _server = Server::start();
-    assert_eq!(send("GET / HTTP/1.1\r\n\r\n"), "HTTP/1.1 200 OK\r\n\r\n");
+    assert_eq!(send("GET / HTTP/1.1\r\n\r\n"), "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
 }
 
 #[test]
 fn handles_sequential_connections() {
     let _server = Server::start();
     for _ in 0..5 {
-        assert_eq!(get("/"), "HTTP/1.1 200 OK\r\n\r\n");
-        assert_eq!(get("/nope"), "HTTP/1.1 404 Not Found\r\n\r\n");
+        assert_eq!(get("/"), "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+        assert_eq!(get("/nope"), "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
     }
 }
 
@@ -98,12 +98,12 @@ fn handles_sequential_connections() {
 fn malformed_request_closes_without_crashing() {
     let _server = Server::start();
     assert_eq!(send("garbage\r\n\r\n"), "");
-    assert_eq!(get("/"), "HTTP/1.1 200 OK\r\n\r\n");
+    assert_eq!(get("/"), "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
 }
 
 #[test]
 fn unknown_method_closes_without_crashing() {
     let _server = Server::start();
     assert_eq!(send("BREW / HTTP/1.1\r\n\r\n"), "");
-    assert_eq!(get("/"), "HTTP/1.1 200 OK\r\n\r\n");
+    assert_eq!(get("/"), "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
 }

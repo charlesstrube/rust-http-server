@@ -31,7 +31,7 @@ fn main() {
 
                 let response = route(&request);
 
-                let result = stream.write_all(&response.to_write());
+                let result = stream.write_all(&response.into_bytes());
 
                 if let Err(e) = result {
                     println!("error: {}", e);
