@@ -107,3 +107,55 @@ fn unknown_method_closes_without_crashing() {
     assert_eq!(send("BREW / HTTP/1.1\r\n\r\n"), "");
     assert_eq!(get("/"), "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
 }
+
+#[test]
+fn echo_matches_spec_example() {
+    let _server = Server::start();
+    assert_eq!(
+        get("/echo/abc"),
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 3\r\n\r\nabc"
+    );
+}
+
+#[test]
+fn echo_returns_random_string() {
+    let _server = Server::start();
+    for word in ["banana", "mango-grape", "x"] {
+        assert_eq!(
+            get(&format!("/echo/{word}")),
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{word}",
+                word.len()
+            )
+        );
+    }
+}
+
+#[test]
+fn echo_works_with_request_line_only() {
+    let _server = Server::start();
+    assert_eq!(
+        send("GET /echo/hi HTTP/1.1\r\n\r\n"),
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nhi"
+    );
+}
+
+#[test]
+fn echo_without_string_responds_404() {
+    let _server = Server::start();
+    assert_eq!(get("/echo"), "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+}
+
+#[test]
+fn echo_with_empty_string_responds_404() {
+    let _server = Server::start();
+    assert_eq!(get("/echo/"), "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+}
+
+#[test]
+fn echo_and_other_routes_on_same_server() {
+    let _server = Server::start();
+    assert!(get("/echo/one").ends_with("\r\n\r\none"));
+    assert_eq!(get("/"), "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+    assert!(get("/echo/two").ends_with("\r\n\r\ntwo"));
+}

@@ -29,7 +29,13 @@ Note: Rust edition 2024, toolchain pinned to Rust 1.96 (`Cargo.toml` `rust-versi
 
 ## Architecture
 
-Currently everything lives in `src/main.rs`: a `TcpListener` bound to `127.0.0.1:4221` iterating over `listener.incoming()`. The code is at an early stage — **update this section as modules are introduced** (e.g. request parsing, response building, routing, concurrency model).
+- `src/main.rs` — `TcpListener` on `127.0.0.1:4221`, handles connections sequentially: reads the request line, parses it into a `Request`, routes it, writes `Response::to_bytes()`.
+- `src/http/` — protocol types, independent of the handlers:
+  - `request.rs` (`Request`: method + path, `FromStr` from the request line), `method.rs`, `status.rs` (`StatusCode`, `Display` = `"200 OK"`).
+  - `headers.rs` — `Headers` newtype over `Vec<(String, String)>` (keeps order and duplicates; case-insensitive `get`/`set`; `Display` emits `Name: value\r\n` lines).
+  - `response.rs` — `Response`; `new` always sets `Content-Length` from the body (handlers must not rely on setting it).
+- `src/handlers/` — `route(&Request) -> Response` in `mod.rs`; `echo.rs` (`/echo/{str}`, `Echo` → `Response` via `From`). Dependency direction: handlers → http, never the reverse.
+- `tests/http_server.rs` — integration tests against the real server over TCP.
 
 ### Conventions
 
@@ -43,8 +49,8 @@ Base stages
 
 - [x] Bind to a port
 - [x] Respond with 200
-- [ ] Extract URL path
-- [ ] Respond with body
+- [x] Extract URL path
+- [x] Respond with body
 - [ ] Read header
 - [ ] Concurrent connections
 - [ ] Return a file

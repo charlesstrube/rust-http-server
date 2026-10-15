@@ -135,6 +135,12 @@ mod test {
         );
     }
 
+    // RFC 9110 §8.6: Content-Length is a number of octets, not characters.
+    #[test]
+    fn content_length_counts_bytes_not_chars() {
+        assert_eq!(text_plain("é").header("Content-Length"), Some("2"));
+    }
+
     #[test]
     fn serializing_twice_gives_same_output() {
         let first = text_plain("abc").into_bytes();

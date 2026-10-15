@@ -106,6 +106,15 @@ mod test {
     }
 
     #[test]
+    fn echo_with_empty_string_returns_404() {
+        let response = route_line("GET /echo/ HTTP/1.1");
+
+        assert_eq!(response.status(), &StatusCode::NotFound);
+        assert_eq!(response.body(), "");
+        assert_eq!(response.header("Content-Type"), None);
+    }
+
+    #[test]
     fn echo_prefix_must_be_a_full_segment() {
         assert_eq!(
             route_line("GET /echoabc HTTP/1.1").status(),
