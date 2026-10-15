@@ -1,12 +1,23 @@
-use crate::http::{request::Request, response::Response, status::StatusCode};
+use crate::{
+    handlers::echo::Echo,
+    http::{request::Request, response::Response, status::StatusCode},
+};
+
+pub mod echo;
 
 pub fn route(request: &Request) -> Response {
-    let status = match request.path() {
-        "/" => StatusCode::Ok,
-        _ => StatusCode::NotFound,
+    let path = request.path();
+
+    let response: Response = match path {
+        "/" => Response::new(StatusCode::Ok, vec![], String::new()),
+        _ if path.starts_with("/echo/") => match Echo::try_from(path) {
+            Ok(echo) => echo.into(),
+            Err(_) => Response::new(StatusCode::NotFound, vec![], String::new()),
+        },
+        _ => Response::new(StatusCode::NotFound, vec![], String::new()),
     };
 
-    Response::new(status, vec![], String::new())
+    response
 }
 
 #[cfg(test)]
@@ -41,6 +52,62 @@ mod test {
 
     #[test]
     fn root_matches_exactly() {
-        assert_eq!(route_line("GET // HTTP/1.1").status(), &StatusCode::NotFound);
+        assert_eq!(
+            route_line("GET // HTTP/1.1").status(),
+            &StatusCode::NotFound
+        );
+    }
+
+    #[test]
+    fn echo_returns_200() {
+        assert_eq!(
+            route_line("GET /echo/abc HTTP/1.1").status(),
+            &StatusCode::Ok
+        );
+    }
+
+    #[test]
+    fn echo_returns_string_as_body() {
+        assert_eq!(route_line("GET /echo/abc HTTP/1.1").body(), "abc");
+    }
+
+    #[test]
+    fn echo_sets_content_type_text_plain() {
+        assert_eq!(
+            route_line("GET /echo/abc HTTP/1.1").header("Content-Type"),
+            Some("text/plain")
+        );
+    }
+
+    #[test]
+    fn echo_sets_content_length() {
+        assert_eq!(
+            route_line("GET /echo/hello-world HTTP/1.1").header("Content-Length"),
+            Some("11")
+        );
+    }
+
+    #[test]
+    fn echo_matches_spec_bytes() {
+        assert_eq!(
+            route_line("GET /echo/abc HTTP/1.1").to_write(),
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 3\r\n\r\nabc"
+        );
+    }
+
+    #[test]
+    fn echo_without_trailing_slash_returns_404() {
+        assert_eq!(
+            route_line("GET /echo HTTP/1.1").status(),
+            &StatusCode::NotFound
+        );
+    }
+
+    #[test]
+    fn echo_prefix_must_be_a_full_segment() {
+        assert_eq!(
+            route_line("GET /echoabc HTTP/1.1").status(),
+            &StatusCode::NotFound
+        );
     }
 }
