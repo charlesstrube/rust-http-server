@@ -1,10 +1,11 @@
 use std::str::FromStr;
 
-use crate::http::method::Method;
+use crate::http::{headers::Headers, method::Method};
 
 pub struct Request {
     path: String,
     method: Method,
+    headers: Headers,
 }
 
 #[derive(Debug, PartialEq, thiserror::Error)]
@@ -24,6 +25,7 @@ impl Request {
         Ok(Self {
             path: path.into(),
             method: parsed_method,
+            headers: Headers::default(),
         })
     }
 
@@ -33,6 +35,10 @@ impl Request {
 
     pub fn method(&self) -> &Method {
         &self.method
+    }
+
+    pub fn header(&self, key: &str) -> Option<&str> {
+        self.headers.get(key)
     }
 }
 
@@ -113,5 +119,56 @@ mod test {
     fn new_rejects_unknown_method() {
         let result = Request::new("/", "DELETE");
         assert_eq!(result.err(), Some(RequestError::InvalidMethod));
+    }
+
+    // Parsing a full request head: request line, field lines, empty line (RFC 9112 §2.1).
+
+    const SPEC_REQUEST: &str = "GET /user-agent HTTP/1.1\r\nHost: localhost:4221\r\nUser-Agent: foobar/1.2.3\r\nAccept: */*\r\n\r\n";
+
+    #[test]
+    fn parses_request_line_of_full_head() {
+        let request: Request = SPEC_REQUEST.parse().unwrap();
+        assert_eq!(request.path(), "/user-agent");
+        assert!(matches!(request.method(), Method::Get));
+    }
+
+    #[test]
+    fn parses_headers_after_request_line() {
+        let request: Request = SPEC_REQUEST.parse().unwrap();
+        assert_eq!(request.header("Host"), Some("localhost:4221"));
+        assert_eq!(request.header("User-Agent"), Some("foobar/1.2.3"));
+        assert_eq!(request.header("Accept"), Some("*/*"));
+    }
+
+    // RFC 9110 §5.1: field names are case-insensitive.
+    #[test]
+    fn header_lookup_is_case_insensitive() {
+        let request: Request = SPEC_REQUEST.parse().unwrap();
+        assert_eq!(request.header("user-agent"), Some("foobar/1.2.3"));
+        assert_eq!(request.header("USER-AGENT"), Some("foobar/1.2.3"));
+    }
+
+    #[test]
+    fn missing_header_is_none() {
+        let request: Request = SPEC_REQUEST.parse().unwrap();
+        assert_eq!(request.header("X-Unknown"), None);
+    }
+
+    #[test]
+    fn request_line_only_has_no_headers() {
+        let request: Request = "GET / HTTP/1.1\r\n\r\n".parse().unwrap();
+        assert_eq!(request.header("User-Agent"), None);
+    }
+
+    #[test]
+    fn new_has_no_headers() {
+        let request = Request::new("/", "GET").unwrap();
+        assert_eq!(request.header("Host"), None);
+    }
+
+    #[test]
+    fn rejects_invalid_header_line() {
+        let result = "GET / HTTP/1.1\r\ngarbage\r\n\r\n".parse::<Request>();
+        assert!(matches!(result, Err(RequestError::InvalidHeader(_))));
     }
 }

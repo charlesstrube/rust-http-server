@@ -4,6 +4,7 @@ use std::fmt;
 pub enum StatusCode {
     Ok,
     NotFound,
+    BadRequest,
 }
 
 impl StatusCode {
@@ -11,6 +12,7 @@ impl StatusCode {
         match self {
             StatusCode::Ok => "OK",
             StatusCode::NotFound => "Not Found",
+            StatusCode::BadRequest => "Bad Request",
         }
     }
 
@@ -18,6 +20,7 @@ impl StatusCode {
         match self {
             StatusCode::Ok => 200,
             StatusCode::NotFound => 404,
+            StatusCode::BadRequest => 400,
         }
     }
 }
@@ -45,8 +48,15 @@ mod test {
     }
 
     #[test]
+    fn bad_request_code_and_reason() {
+        assert_eq!(StatusCode::BadRequest.code(), 400);
+        assert_eq!(StatusCode::BadRequest.reason(), "Bad Request");
+    }
+
+    #[test]
     fn displays_code_then_reason() {
         assert_eq!(StatusCode::Ok.to_string(), "200 OK");
         assert_eq!(StatusCode::NotFound.to_string(), "404 Not Found");
+        assert_eq!(StatusCode::BadRequest.to_string(), "400 Bad Request");
     }
 }

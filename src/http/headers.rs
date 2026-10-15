@@ -196,4 +196,127 @@ mod test {
 
         assert_eq!(headers.get("Content-Type"), Some("text/plain"));
     }
+
+    // Parsing a header section, RFC 9112 §5:
+    // field-line = field-name ":" OWS field-value OWS
+
+    fn parse(block: &str) -> Headers {
+        block.parse().unwrap()
+    }
+
+    #[test]
+    fn parses_empty_block() {
+        assert_eq!(parse("").to_string(), "");
+    }
+
+    #[test]
+    fn parses_single_field_line() {
+        assert_eq!(
+            parse("User-Agent: foobar/1.2.3\r\n").get("User-Agent"),
+            Some("foobar/1.2.3")
+        );
+    }
+
+    #[test]
+    fn parses_multiple_field_lines_in_order() {
+        let block = "Host: localhost:4221\r\nUser-Agent: foobar/1.2.3\r\nAccept: */*\r\n";
+
+        assert_eq!(parse(block).to_string(), block);
+    }
+
+    #[test]
+    fn parses_without_trailing_crlf() {
+        assert_eq!(parse("A: 1\r\nB: 2").get("B"), Some("2"));
+    }
+
+    // The empty line closing the header section is not a field line.
+    #[test]
+    fn ignores_terminating_empty_line() {
+        assert_eq!(parse("A: 1\r\n\r\n").to_string(), "A: 1\r\n");
+    }
+
+    // Only the first colon separates the name from the value.
+    #[test]
+    fn value_may_contain_colons() {
+        assert_eq!(
+            parse("Host: localhost:4221\r\n").get("Host"),
+            Some("localhost:4221")
+        );
+    }
+
+    #[test]
+    fn trims_optional_whitespace_around_value() {
+        assert_eq!(
+            parse("User-Agent: \t foobar/1.2.3 \t\r\n").get("User-Agent"),
+            Some("foobar/1.2.3")
+        );
+    }
+
+    #[test]
+    fn whitespace_after_colon_is_optional() {
+        assert_eq!(
+            parse("User-Agent:foobar/1.2.3\r\n").get("User-Agent"),
+            Some("foobar/1.2.3")
+        );
+    }
+
+    #[test]
+    fn keeps_inner_whitespace_in_value() {
+        assert_eq!(
+            parse("User-Agent: Mozilla/5.0 (X11; Linux x86_64)\r\n").get("User-Agent"),
+            Some("Mozilla/5.0 (X11; Linux x86_64)")
+        );
+    }
+
+    #[test]
+    fn accepts_empty_value() {
+        assert_eq!(parse("X-Empty:\r\n").get("X-Empty"), Some(""));
+    }
+
+    #[test]
+    fn parsed_names_keep_original_case() {
+        assert_eq!(parse("user-agent: x\r\n").to_string(), "user-agent: x\r\n");
+    }
+
+    #[test]
+    fn parsed_names_are_matched_case_insensitively() {
+        assert_eq!(parse("user-agent: x\r\n").get("User-Agent"), Some("x"));
+    }
+
+    #[test]
+    fn parses_duplicate_field_lines() {
+        let headers = parse("Set-Cookie: a=1\r\nSet-Cookie: b=2\r\n");
+
+        assert_eq!(count_lines(&headers, "Set-Cookie"), 2);
+    }
+
+    #[test]
+    fn rejects_line_without_colon() {
+        assert!(matches!(
+            "garbage\r\n".parse::<Headers>(),
+            Err(ParseHeadersError::MissingColon)
+        ));
+    }
+
+    // RFC 9112 §5.1: no whitespace is allowed between the field name and the colon.
+    #[test]
+    fn rejects_whitespace_before_colon() {
+        assert!(matches!(
+            "Host : localhost\r\n".parse::<Headers>(),
+            Err(ParseHeadersError::InvalidName)
+        ));
+    }
+
+    #[test]
+    fn rejects_empty_name() {
+        assert!(matches!(
+            ": x\r\n".parse::<Headers>(),
+            Err(ParseHeadersError::InvalidName)
+        ));
+    }
+
+    #[test]
+    fn rejects_whole_block_if_one_line_is_invalid() {
+        assert!("A: 1\r\ngarbage\r\nB: 2\r\n".parse::<Headers>().is_err());
+    }
 }

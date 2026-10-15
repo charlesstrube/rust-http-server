@@ -67,6 +67,18 @@ fn get(path: &str) -> String {
     ))
 }
 
+// `headers` is a block of `Name: value\r\n` lines; the closing empty line is added here.
+fn get_with_headers(path: &str, headers: &str) -> String {
+    send(&format!("GET {path} HTTP/1.1\r\n{headers}\r\n"))
+}
+
+fn text_plain_200(body: &str) -> String {
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    )
+}
+
 #[test]
 fn root_responds_200() {
     let _server = Server::start();
@@ -158,4 +170,75 @@ fn echo_and_other_routes_on_same_server() {
     assert!(get("/echo/one").ends_with("\r\n\r\none"));
     assert_eq!(get("/"), "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
     assert!(get("/echo/two").ends_with("\r\n\r\ntwo"));
+}
+
+#[test]
+fn user_agent_matches_spec_example() {
+    let _server = Server::start();
+    assert_eq!(
+        get_with_headers(
+            "/user-agent",
+            "Host: localhost:4221\r\nUser-Agent: foobar/1.2.3\r\nAccept: */*\r\n"
+        ),
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 12\r\n\r\nfoobar/1.2.3"
+    );
+}
+
+#[test]
+fn user_agent_returns_random_values() {
+    let _server = Server::start();
+    for agent in ["curl/8.4.0", "grape/mango-banana", "Mozilla/5.0 (X11; Linux x86_64)"] {
+        assert_eq!(
+            get_with_headers("/user-agent", &format!("Host: localhost:4221\r\nUser-Agent: {agent}\r\n")),
+            text_plain_200(agent)
+        );
+    }
+}
+
+#[test]
+fn user_agent_header_name_is_case_insensitive() {
+    let _server = Server::start();
+    assert_eq!(
+        get_with_headers("/user-agent", "user-agent: foobar/1.2.3\r\n"),
+        text_plain_200("foobar/1.2.3")
+    );
+}
+
+#[test]
+fn user_agent_header_position_does_not_matter() {
+    let _server = Server::start();
+    assert_eq!(
+        get_with_headers("/user-agent", "User-Agent: first/1.0\r\nHost: localhost:4221\r\nAccept: */*\r\n"),
+        text_plain_200("first/1.0")
+    );
+}
+
+#[test]
+fn user_agent_from_default_request() {
+    let _server = Server::start();
+    assert_eq!(get("/user-agent"), text_plain_200("curl/8.0"));
+}
+
+#[test]
+fn user_agent_missing_responds_400() {
+    let _server = Server::start();
+    assert_eq!(
+        get_with_headers("/user-agent", "Host: localhost:4221\r\n"),
+        "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n"
+    );
+}
+
+#[test]
+fn user_agent_and_echo_on_same_server() {
+    let _server = Server::start();
+    assert_eq!(get_with_headers("/user-agent", "User-Agent: a/1\r\n"), text_plain_200("a/1"));
+    assert_eq!(get("/echo/abc"), text_plain_200("abc"));
+    assert_eq!(get_with_headers("/user-agent", "User-Agent: b/2\r\n"), text_plain_200("b/2"));
+}
+
+#[test]
+fn invalid_header_does_not_crash_server() {
+    let _server = Server::start();
+    let _ = send("GET / HTTP/1.1\r\nHost : localhost\r\n\r\n");
+    assert_eq!(get("/"), "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
 }

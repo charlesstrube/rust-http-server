@@ -19,11 +19,16 @@ impl Response {
         }
     }
 
+    pub fn bad_request() -> Self {
+        Self::new(StatusCode::BadRequest, Headers::default(), String::new())
+    }
+
     pub fn status(&self) -> &StatusCode {
         &self.status
     }
 
     pub fn into_bytes(self) -> Vec<u8> {
+        println!("headers: {}", self.headers.to_string());
         let formatted = format!(
             "{} {}\r\n{}\r\n{}",
             HTTP_VERSION,
