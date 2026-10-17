@@ -3,7 +3,7 @@
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::process::{Child, Command, Stdio};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Barrier, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -49,18 +49,27 @@ impl Drop for Server {
     }
 }
 
-fn send(raw: &str) -> String {
-    let mut stream = TcpStream::connect(ADDR).expect("failed to connect");
+fn connect() -> TcpStream {
+    let stream = TcpStream::connect(ADDR).expect("failed to connect");
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
+    stream
+}
+
+// Writes `raw` on an already-open connection and reads until the server closes it.
+fn send_on(mut stream: TcpStream, raw: &str) -> String {
     stream.write_all(raw.as_bytes()).unwrap();
 
     let mut response = Vec::new();
     stream
         .read_to_end(&mut response)
-        .expect("failed to read response");
+        .expect("no response in time: is another connection blocking the server?");
     String::from_utf8(response).expect("response is not valid UTF-8")
+}
+
+fn send(raw: &str) -> String {
+    send_on(connect(), raw)
 }
 
 fn get(path: &str) -> String {
@@ -280,4 +289,82 @@ fn invalid_header_responds_400() {
         "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n"
     );
     assert_eq!(get("/"), "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+}
+
+// --- Concurrent connections ---
+
+const OK_EMPTY: &str = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+
+#[test]
+fn idle_connection_does_not_block_others() {
+    let _server = Server::start();
+    let _idle = connect();
+    assert_eq!(send("GET / HTTP/1.1\r\n\r\n"), OK_EMPTY);
+}
+
+#[test]
+fn partial_request_does_not_block_others() {
+    let _server = Server::start();
+    let mut slow = connect();
+    slow.write_all(b"GET /echo/slow HT").unwrap();
+
+    assert_eq!(get("/echo/fast"), text_plain_200("fast"));
+
+    assert_eq!(send_on(slow, "TP/1.1\r\n\r\n"), text_plain_200("slow"));
+}
+
+#[test]
+fn connections_served_in_reverse_order() {
+    let _server = Server::start();
+    let streams: Vec<TcpStream> = (0..5).map(|_| connect()).collect();
+
+    for (i, stream) in streams.into_iter().enumerate().rev() {
+        assert_eq!(
+            send_on(stream, &format!("GET /echo/{i} HTTP/1.1\r\n\r\n")),
+            text_plain_200(&i.to_string())
+        );
+    }
+}
+
+// Mirrors the CodeCrafters tester: open every connection first, then send all requests at once.
+#[test]
+fn many_simultaneous_connections() {
+    let _server = Server::start();
+    const N: usize = 10;
+    let barrier = Arc::new(Barrier::new(N));
+
+    let handles: Vec<_> = (0..N)
+        .map(|i| {
+            let stream = connect();
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                let raw = if i % 2 == 0 {
+                    "GET / HTTP/1.1\r\n\r\n".to_string()
+                } else {
+                    format!("GET /echo/{i} HTTP/1.1\r\n\r\n")
+                };
+                (i, send_on(stream, &raw))
+            })
+        })
+        .collect();
+
+    for handle in handles {
+        let (i, response) = handle.join().expect("client thread panicked");
+        if i % 2 == 0 {
+            assert_eq!(response, OK_EMPTY);
+        } else {
+            assert_eq!(response, text_plain_200(&i.to_string()));
+        }
+    }
+}
+
+#[test]
+fn abandoned_connection_does_not_break_server() {
+    let _server = Server::start();
+    {
+        let mut gone = connect();
+        gone.write_all(b"GET / HT").unwrap();
+    }
+    assert_eq!(get("/"), OK_EMPTY);
 }

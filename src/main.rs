@@ -3,7 +3,7 @@ mod http;
 
 mod server;
 
-use std::net::TcpListener;
+use std::{net::TcpListener, thread};
 
 use crate::server::handle_connection;
 
@@ -12,7 +12,9 @@ fn main() {
 
     for stream in listener.incoming() {
         match stream {
-            Ok(stream) => handle_connection(stream),
+            Ok(stream) => {
+                thread::spawn(move || handle_connection(stream));
+            }
             Err(e) => println!("error: {}", e),
         }
     }
