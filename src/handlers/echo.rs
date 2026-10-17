@@ -7,13 +7,25 @@ pub enum ParseEchoError {
 }
 
 pub struct Echo {
-    body: String,
-    headers: Headers,
+    value: String,
 }
 
 impl From<Echo> for Response {
     fn from(echo: Echo) -> Self {
-        Response::new(StatusCode::Ok, echo.headers, echo.body)
+        Response::new(
+            StatusCode::Ok,
+            Headers::from(vec![(
+                String::from("Content-Type"),
+                String::from("text/plain"),
+            )]),
+            echo.value,
+        )
+    }
+}
+
+impl From<ParseEchoError> for Response {
+    fn from(_error: ParseEchoError) -> Self {
+        Response::new(StatusCode::NotFound, Headers::default(), String::new())
     }
 }
 
@@ -28,11 +40,8 @@ impl TryFrom<String> for Echo {
                     return Err(ParseEchoError::NoContent);
                 }
 
-                let mut headers = Headers::default();
-                headers.add("Content-Type", "text/plain");
                 Ok(Self {
-                    body: content.into(),
-                    headers,
+                    value: content.into(),
                 })
             }
             None => Err(ParseEchoError::NoContent),
@@ -57,26 +66,24 @@ mod test {
 
     #[test]
     fn extracts_string_after_prefix() {
-        assert_eq!(echo("/echo/abc").body, "abc");
+        assert_eq!(echo("/echo/abc").value, "abc");
     }
 
     #[test]
     fn keeps_slashes_in_string() {
-        assert_eq!(echo("/echo/a/b/c").body, "a/b/c");
+        assert_eq!(echo("/echo/a/b/c").value, "a/b/c");
     }
 
     #[test]
     fn sets_content_type_text_plain() {
-        assert_eq!(
-            echo("/echo/abc").headers.get("Content-Type"),
-            Some("text/plain")
-        );
+        let response: Response = echo("/echo/abc").into();
+        assert_eq!(response.header("Content-Type"), Some("text/plain"));
     }
 
     #[test]
     fn parses_from_owned_string() {
         assert_eq!(
-            Echo::try_from(String::from("/echo/abc")).unwrap().body,
+            Echo::try_from(String::from("/echo/abc")).unwrap().value,
             "abc"
         );
     }

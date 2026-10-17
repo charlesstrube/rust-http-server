@@ -57,7 +57,9 @@ fn send(raw: &str) -> String {
     stream.write_all(raw.as_bytes()).unwrap();
 
     let mut response = Vec::new();
-    stream.read_to_end(&mut response).expect("failed to read response");
+    stream
+        .read_to_end(&mut response)
+        .expect("failed to read response");
     String::from_utf8(response).expect("response is not valid UTF-8")
 }
 
@@ -88,13 +90,19 @@ fn root_responds_200() {
 #[test]
 fn unknown_path_responds_404() {
     let _server = Server::start();
-    assert_eq!(get("/abcdefg"), "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+    assert_eq!(
+        get("/abcdefg"),
+        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"
+    );
 }
 
 #[test]
 fn request_line_only_is_enough() {
     let _server = Server::start();
-    assert_eq!(send("GET / HTTP/1.1\r\n\r\n"), "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+    assert_eq!(
+        send("GET / HTTP/1.1\r\n\r\n"),
+        "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+    );
 }
 
 #[test]
@@ -102,21 +110,27 @@ fn handles_sequential_connections() {
     let _server = Server::start();
     for _ in 0..5 {
         assert_eq!(get("/"), "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
-        assert_eq!(get("/nope"), "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+        assert_eq!(
+            get("/nope"),
+            "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"
+        );
     }
 }
 
 #[test]
-fn malformed_request_closes_without_crashing() {
+fn malformed_request_responds_400() {
     let _server = Server::start();
-    assert_eq!(send("garbage\r\n\r\n"), "");
+    assert_eq!(send("garbage\r\n\r\n"), "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n");
     assert_eq!(get("/"), "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
 }
 
 #[test]
-fn unknown_method_closes_without_crashing() {
+fn unknown_method_responds_400() {
     let _server = Server::start();
-    assert_eq!(send("BREW / HTTP/1.1\r\n\r\n"), "");
+    assert_eq!(
+        send("BREW / HTTP/1.1\r\n\r\n"),
+        "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n"
+    );
     assert_eq!(get("/"), "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
 }
 
@@ -155,13 +169,19 @@ fn echo_works_with_request_line_only() {
 #[test]
 fn echo_without_string_responds_404() {
     let _server = Server::start();
-    assert_eq!(get("/echo"), "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+    assert_eq!(
+        get("/echo"),
+        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"
+    );
 }
 
 #[test]
 fn echo_with_empty_string_responds_404() {
     let _server = Server::start();
-    assert_eq!(get("/echo/"), "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+    assert_eq!(
+        get("/echo/"),
+        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"
+    );
 }
 
 #[test]
@@ -187,9 +207,16 @@ fn user_agent_matches_spec_example() {
 #[test]
 fn user_agent_returns_random_values() {
     let _server = Server::start();
-    for agent in ["curl/8.4.0", "grape/mango-banana", "Mozilla/5.0 (X11; Linux x86_64)"] {
+    for agent in [
+        "curl/8.4.0",
+        "grape/mango-banana",
+        "Mozilla/5.0 (X11; Linux x86_64)",
+    ] {
         assert_eq!(
-            get_with_headers("/user-agent", &format!("Host: localhost:4221\r\nUser-Agent: {agent}\r\n")),
+            get_with_headers(
+                "/user-agent",
+                &format!("Host: localhost:4221\r\nUser-Agent: {agent}\r\n")
+            ),
             text_plain_200(agent)
         );
     }
@@ -208,7 +235,10 @@ fn user_agent_header_name_is_case_insensitive() {
 fn user_agent_header_position_does_not_matter() {
     let _server = Server::start();
     assert_eq!(
-        get_with_headers("/user-agent", "User-Agent: first/1.0\r\nHost: localhost:4221\r\nAccept: */*\r\n"),
+        get_with_headers(
+            "/user-agent",
+            "User-Agent: first/1.0\r\nHost: localhost:4221\r\nAccept: */*\r\n"
+        ),
         text_plain_200("first/1.0")
     );
 }
@@ -231,14 +261,23 @@ fn user_agent_missing_responds_400() {
 #[test]
 fn user_agent_and_echo_on_same_server() {
     let _server = Server::start();
-    assert_eq!(get_with_headers("/user-agent", "User-Agent: a/1\r\n"), text_plain_200("a/1"));
+    assert_eq!(
+        get_with_headers("/user-agent", "User-Agent: a/1\r\n"),
+        text_plain_200("a/1")
+    );
     assert_eq!(get("/echo/abc"), text_plain_200("abc"));
-    assert_eq!(get_with_headers("/user-agent", "User-Agent: b/2\r\n"), text_plain_200("b/2"));
+    assert_eq!(
+        get_with_headers("/user-agent", "User-Agent: b/2\r\n"),
+        text_plain_200("b/2")
+    );
 }
 
 #[test]
-fn invalid_header_does_not_crash_server() {
+fn invalid_header_responds_400() {
     let _server = Server::start();
-    let _ = send("GET / HTTP/1.1\r\nHost : localhost\r\n\r\n");
+    assert_eq!(
+        send("GET / HTTP/1.1\r\nHost : localhost\r\n\r\n"),
+        "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n"
+    );
     assert_eq!(get("/"), "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
 }

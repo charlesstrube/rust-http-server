@@ -28,7 +28,6 @@ impl Response {
     }
 
     pub fn into_bytes(self) -> Vec<u8> {
-        println!("headers: {}", self.headers.to_string());
         let formatted = format!(
             "{} {}\r\n{}\r\n{}",
             HTTP_VERSION,
@@ -40,10 +39,12 @@ impl Response {
         formatted.into_bytes()
     }
 
+    #[cfg(test)]
     pub fn header(&self, key: &str) -> Option<&str> {
         self.headers.get(key)
     }
 
+    #[cfg(test)]
     pub fn body(&self) -> &str {
         &self.body
     }

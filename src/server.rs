@@ -29,8 +29,6 @@ pub fn handle_connection(mut stream: TcpStream) {
         };
     }
 
-    println!("final: {}", &head.as_str());
-
     let response = match Request::from_str(head.as_str()) {
         Ok(request) => route(&request),
         Err(err) => {

@@ -1,11 +1,47 @@
-use std::fmt::Display;
+use std::{fmt::Display, str::FromStr};
 
 #[derive(Default)]
 pub struct Headers(Vec<(String, String)>);
 
+#[derive(Debug, thiserror::Error, PartialEq)]
+pub enum ParseHeadersError {
+    #[error("Missing colon in header line")]
+    MissingColon,
+    #[error("Invalid header name")]
+    InvalidName,
+}
+
 impl From<Vec<(String, String)>> for Headers {
     fn from(value: Vec<(String, String)>) -> Self {
         Self(value)
+    }
+}
+
+impl FromStr for Headers {
+    type Err = ParseHeadersError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let headers = s
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| {
+                let value = line
+                    .split_once(":")
+                    .ok_or(ParseHeadersError::MissingColon)?;
+
+                if value.0.trim().is_empty() {
+                    return Err(ParseHeadersError::InvalidName);
+                }
+
+                if value.0.contains(char::is_whitespace) {
+                    return Err(ParseHeadersError::InvalidName);
+                }
+
+                Ok((String::from(value.0.trim()), String::from(value.1.trim())))
+            })
+            .collect::<Result<Vec<(String, String)>, ParseHeadersError>>()?;
+
+        Ok(Self(headers))
     }
 }
 
@@ -19,10 +55,6 @@ impl Display for Headers {
 }
 
 impl Headers {
-    pub fn new(values: Vec<(String, String)>) -> Self {
-        Self(values)
-    }
-
     pub fn add(&mut self, key: &str, value: &str) {
         self.0.push((key.into(), value.into()));
     }
@@ -41,7 +73,7 @@ impl Headers {
         let mut found = false;
         self.0.retain_mut(|(current_key, current_value)| {
             if current_key.eq_ignore_ascii_case(key) {
-                if found == false {
+                if !found {
                     *current_value = value.into();
                     found = true;
                     return true;
@@ -53,7 +85,7 @@ impl Headers {
             }
         });
 
-        if found == false {
+        if !found {
             self.add(key, value);
         }
     }
@@ -76,7 +108,7 @@ mod test {
 
     #[test]
     fn new_is_empty() {
-        assert_eq!(Headers::new(vec![]).to_string(), "");
+        assert_eq!(Headers::from(vec![]).to_string(), "");
     }
 
     #[test]
@@ -86,7 +118,7 @@ mod test {
 
     #[test]
     fn get_returns_added_value() {
-        let headers = Headers::new(vec![("Content-Type".into(), "text/plain".into())]);
+        let headers = Headers::from(vec![("Content-Type".into(), "text/plain".into())]);
 
         assert_eq!(headers.get("Content-Type"), Some("text/plain"));
     }
@@ -94,7 +126,7 @@ mod test {
     // RFC 9110 §5.1: field names are case-insensitive.
     #[test]
     fn get_is_case_insensitive() {
-        let headers = Headers::new(vec![("Content-Type".into(), "text/plain".into())]);
+        let headers = Headers::from(vec![("Content-Type".into(), "text/plain".into())]);
 
         assert_eq!(headers.get("content-type"), Some("text/plain"));
         assert_eq!(headers.get("CONTENT-TYPE"), Some("text/plain"));
@@ -107,21 +139,21 @@ mod test {
 
     #[test]
     fn displays_one_crlf_terminated_line_per_header() {
-        let headers = Headers::new(vec![("Content-Type".into(), "text/plain".into())]);
+        let headers = Headers::from(vec![("Content-Type".into(), "text/plain".into())]);
 
         assert_eq!(headers.to_string(), "Content-Type: text/plain\r\n");
     }
 
     #[test]
     fn displays_in_insertion_order() {
-        let headers = Headers::new(vec![("B".into(), "2".into()), ("A".into(), "1".into())]);
+        let headers = Headers::from(vec![("B".into(), "2".into()), ("A".into(), "1".into())]);
 
         assert_eq!(headers.to_string(), "B: 2\r\nA: 1\r\n");
     }
 
     #[test]
     fn displays_name_with_original_case() {
-        let headers = Headers::new(vec![("x-CuStOm".into(), "v".into())]);
+        let headers = Headers::from(vec![("x-CuStOm".into(), "v".into())]);
 
         assert_eq!(headers.to_string(), "x-CuStOm: v\r\n");
     }
@@ -141,7 +173,7 @@ mod test {
 
     #[test]
     fn get_returns_first_value_of_duplicates() {
-        let headers = Headers::new(vec![
+        let headers = Headers::from(vec![
             ("Set-Cookie".into(), "a=1".into()),
             ("Set-Cookie".into(), "b=2".into()),
         ]);
@@ -311,6 +343,24 @@ mod test {
     fn rejects_empty_name() {
         assert!(matches!(
             ": x\r\n".parse::<Headers>(),
+            Err(ParseHeadersError::InvalidName)
+        ));
+    }
+
+    // A field name is a token (RFC 9110 §5.1): whitespace is never allowed inside it.
+    #[test]
+    fn rejects_whitespace_inside_name() {
+        assert!(matches!(
+            "Ho st: localhost\r\n".parse::<Headers>(),
+            Err(ParseHeadersError::InvalidName)
+        ));
+    }
+
+    // RFC 9112 §5.2: a line starting with whitespace is an obsolete line folding (obs-fold).
+    #[test]
+    fn rejects_leading_whitespace_before_name() {
+        assert!(matches!(
+            "Host: localhost\r\n User-Agent: foobar/1.2.3\r\n".parse::<Headers>(),
             Err(ParseHeadersError::InvalidName)
         ));
     }

@@ -1,10 +1,22 @@
 use crate::{
     handlers::echo::Echo,
+    handlers::user_agent::UserAgent,
     http::{headers::Headers, request::Request, response::Response, status::StatusCode},
 };
 
 pub mod echo;
 pub mod user_agent;
+
+fn respond<T, E>(result: Result<T, E>) -> Response
+where
+    T: Into<Response>,
+    E: Into<Response>,
+{
+    match result {
+        Ok(value) => value.into(),
+        Err(error) => error.into(),
+    }
+}
 
 pub fn route(request: &Request) -> Response {
     let path = request.path();
@@ -13,10 +25,8 @@ pub fn route(request: &Request) -> Response {
 
     match path {
         "/" => Response::new(StatusCode::Ok, headers, String::new()),
-        _ if path.starts_with("/echo/") => match Echo::try_from(path) {
-            Ok(echo) => echo.into(),
-            Err(_) => Response::new(StatusCode::NotFound, headers, String::new()),
-        },
+        "/user-agent" => respond(UserAgent::try_from(request)),
+        _ if path.starts_with("/echo/") => respond(Echo::try_from(path)),
         _ => Response::new(StatusCode::NotFound, headers, String::new()),
     }
 }
@@ -26,7 +36,13 @@ mod test {
     use super::*;
 
     fn route_line(line: &str) -> Response {
-        let request: Request = line.parse().unwrap();
+        let request: Request = match line.parse() {
+            Ok(request) => request,
+            Err(e) => {
+                println!("err: {}", e);
+                panic!();
+            }
+        };
         route(&request)
     }
 

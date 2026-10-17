@@ -1,3 +1,45 @@
+use crate::http::{headers::Headers, request::Request, response::Response, status::StatusCode};
+
+pub struct UserAgent {
+    value: String,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ParseUserAgentError {
+    #[error("Missing User-Agent header")]
+    MissingHeader,
+}
+
+impl TryFrom<&Request> for UserAgent {
+    type Error = ParseUserAgentError;
+
+    fn try_from(request: &Request) -> Result<Self, Self::Error> {
+        match request.header("User-Agent") {
+            Some(ua) => Ok(Self { value: ua.into() }),
+            None => Err(ParseUserAgentError::MissingHeader),
+        }
+    }
+}
+
+impl From<ParseUserAgentError> for Response {
+    fn from(_error: ParseUserAgentError) -> Self {
+        Response::new(StatusCode::BadRequest, Headers::default(), String::new())
+    }
+}
+
+impl From<UserAgent> for Response {
+    fn from(user_agent: UserAgent) -> Self {
+        Self::new(
+            StatusCode::Ok,
+            Headers::from(vec![(
+                String::from("Content-Type"),
+                String::from("text/plain"),
+            )]),
+            user_agent.value,
+        )
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;

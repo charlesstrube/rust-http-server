@@ -1,6 +1,9 @@
 use std::str::FromStr;
 
-use crate::http::{headers::Headers, method::Method};
+use crate::http::{
+    headers::{Headers, ParseHeadersError},
+    method::Method,
+};
 
 pub struct Request {
     path: String,
@@ -14,10 +17,12 @@ pub enum RequestError {
     InvalidMethod,
     #[error("Cannot Parse")]
     CannotParse,
+    #[error(transparent)]
+    InvalidHeader(#[from] ParseHeadersError),
 }
 
 impl Request {
-    pub fn new(path: &str, method: &str) -> Result<Self, RequestError> {
+    pub fn new(path: &str, method: &str, headers: Headers) -> Result<Self, RequestError> {
         let Ok(parsed_method) = Method::try_from(method) else {
             return Err(RequestError::InvalidMethod);
         };
@@ -25,7 +30,7 @@ impl Request {
         Ok(Self {
             path: path.into(),
             method: parsed_method,
-            headers: Headers::default(),
+            headers,
         })
     }
 
@@ -33,8 +38,14 @@ impl Request {
         &self.path
     }
 
+    #[cfg(test)]
     pub fn method(&self) -> &Method {
         &self.method
+    }
+
+    #[expect(dead_code)]
+    pub fn headers(&self) -> &Headers {
+        &self.headers
     }
 
     pub fn header(&self, key: &str) -> Option<&str> {
@@ -45,13 +56,20 @@ impl Request {
 impl FromStr for Request {
     type Err = RequestError;
     fn from_str(line: &str) -> Result<Self, Self::Err> {
-        let mut parts = line.split_whitespace();
+        let (first_line, headers) = match line.split_once("\r\n") {
+            Some((first_line, header_lines)) => (first_line, header_lines.parse::<Headers>()),
+            None => (line, Ok(Headers::default())),
+        };
+
+        let headers = headers?;
+
+        let mut parts = first_line.split_whitespace();
 
         let (Some(method), Some(path), Some(_)) = (parts.next(), parts.next(), parts.next()) else {
             return Err(RequestError::CannotParse);
         };
 
-        Request::new(path, method)
+        Request::new(path, method, headers)
     }
 }
 
@@ -111,13 +129,13 @@ mod test {
 
     #[test]
     fn new_builds_request() {
-        let request = Request::new("/echo/abc", "GET").unwrap();
+        let request = Request::new("/echo/abc", "GET", Headers::default()).unwrap();
         assert_eq!(request.path(), "/echo/abc");
     }
 
     #[test]
     fn new_rejects_unknown_method() {
-        let result = Request::new("/", "DELETE");
+        let result = Request::new("/", "DELETE", Headers::default());
         assert_eq!(result.err(), Some(RequestError::InvalidMethod));
     }
 
@@ -135,6 +153,7 @@ mod test {
     #[test]
     fn parses_headers_after_request_line() {
         let request: Request = SPEC_REQUEST.parse().unwrap();
+
         assert_eq!(request.header("Host"), Some("localhost:4221"));
         assert_eq!(request.header("User-Agent"), Some("foobar/1.2.3"));
         assert_eq!(request.header("Accept"), Some("*/*"));
@@ -162,7 +181,7 @@ mod test {
 
     #[test]
     fn new_has_no_headers() {
-        let request = Request::new("/", "GET").unwrap();
+        let request = Request::new("/", "GET", Headers::default()).unwrap();
         assert_eq!(request.header("Host"), None);
     }
 
