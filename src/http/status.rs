@@ -5,6 +5,8 @@ pub enum StatusCode {
     Ok,
     NotFound,
     BadRequest,
+    Forbidden,
+    InternalServerError,
 }
 
 impl StatusCode {
@@ -13,6 +15,8 @@ impl StatusCode {
             StatusCode::Ok => "OK",
             StatusCode::NotFound => "Not Found",
             StatusCode::BadRequest => "Bad Request",
+            StatusCode::Forbidden => "Forbidden",
+            StatusCode::InternalServerError => "Internal Server Error",
         }
     }
 
@@ -21,6 +25,8 @@ impl StatusCode {
             StatusCode::Ok => 200,
             StatusCode::NotFound => 404,
             StatusCode::BadRequest => 400,
+            StatusCode::Forbidden => 403,
+            StatusCode::InternalServerError => 500,
         }
     }
 }
@@ -54,9 +60,24 @@ mod test {
     }
 
     #[test]
+    fn permission_denied_code_and_reason() {
+        assert_eq!(StatusCode::Forbidden.code(), 403);
+        assert_eq!(StatusCode::Forbidden.reason(), "Forbidden");
+    }
+    #[test]
+    fn internal_server_error_code_and_reason() {
+        assert_eq!(StatusCode::InternalServerError.code(), 500);
+        assert_eq!(
+            StatusCode::InternalServerError.reason(),
+            "Internal Server Error"
+        );
+    }
+
+    #[test]
     fn displays_code_then_reason() {
         assert_eq!(StatusCode::Ok.to_string(), "200 OK");
         assert_eq!(StatusCode::NotFound.to_string(), "404 Not Found");
         assert_eq!(StatusCode::BadRequest.to_string(), "400 Bad Request");
+        assert_eq!(StatusCode::Forbidden.to_string(), "403 Forbidden");
     }
 }

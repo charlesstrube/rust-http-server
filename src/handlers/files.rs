@@ -1,7 +1,7 @@
 use std::{
     fs::canonicalize,
     io,
-    path::{Component, Path, PathBuf},
+    path::{Component, Path},
 };
 
 use crate::http::{headers::Headers, response::Response, status::StatusCode};
@@ -14,30 +14,40 @@ pub struct StaticFile {
 pub enum StaticFileError {
     #[error("File not found")]
     NotFound,
-    #[error("Path does not start with /files/")]
-    NoDirectoryPrefix,
-    #[error("Invalide path")]
+    #[error("Permission denied")]
+    Forbidden,
+    #[error("Invalid path")]
     InvalidPath,
+    #[error("Path does not start with /files/")]
+    MissingFilesPrefix,
+    #[error("I/O error")]
+    Io(#[source] io::Error),
 }
 
 impl From<io::Error> for StaticFileError {
     fn from(_error: io::Error) -> Self {
-        StaticFileError::NotFound
+        match _error.kind() {
+            // file does not exist
+            io::ErrorKind::NotFound
+            // last element isn't a file but a directory
+            | io::ErrorKind::IsADirectory
+            // one of the directories in the path is in reality a file
+            | io::ErrorKind::NotADirectory
+            // name too long
+            | io::ErrorKind::InvalidFilename => Self::NotFound,
+            // can't be read
+            io::ErrorKind::PermissionDenied => StaticFileError::Forbidden,
+            // rest
+            _ => StaticFileError::Io(_error),
+        }
     }
-}
-
-fn cleanup_path(file_path: &str) -> String {
-    file_path
-        .replace("..", "")
-        .replace("//", "/")
-        .trim_start_matches("/")
-        .to_string()
 }
 
 impl StaticFile {
     pub fn open(dir: &std::path::Path, file_path: &str) -> Result<Self, StaticFileError> {
-        let Some(file_path) = file_path.strip_prefix("/files/") else {
-            return Err(StaticFileError::NoDirectoryPrefix);
+        let file_path = match file_path.strip_prefix("/files/") {
+            Some(file) => file,
+            None => return Err(StaticFileError::MissingFilesPrefix),
         };
 
         let is_plain = Path::new(file_path)
@@ -78,7 +88,18 @@ impl From<StaticFile> for Response {
 
 impl From<StaticFileError> for Response {
     fn from(_error: StaticFileError) -> Self {
-        Response::new(StatusCode::NotFound, Headers::default(), String::new())
+        let status = match _error {
+            StaticFileError::NotFound
+            | StaticFileError::MissingFilesPrefix
+            | StaticFileError::InvalidPath => StatusCode::NotFound,
+            StaticFileError::Forbidden => StatusCode::Forbidden,
+            StaticFileError::Io(err) => {
+                eprintln!("static file error: {err}");
+                StatusCode::InternalServerError
+            }
+        };
+
+        Response::new(status, Headers::default(), String::new())
     }
 }
 
