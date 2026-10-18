@@ -1,17 +1,19 @@
 use std::str::FromStr;
 
+use std::sync::Arc;
 use std::{
     io::{BufRead, BufReader},
     net::TcpStream,
 };
 
+use crate::config::Config;
 use crate::handlers::route;
 use crate::http::response::Response;
 use std::io::Write;
 
 use crate::http::request::Request;
 
-pub fn handle_connection(mut stream: TcpStream) {
+pub fn handle_connection(mut stream: TcpStream, config: Arc<Config>) {
     let mut head = String::new();
     let mut buffer = BufReader::new(&stream);
 
@@ -30,7 +32,7 @@ pub fn handle_connection(mut stream: TcpStream) {
     }
 
     let response = match Request::from_str(head.as_str()) {
-        Ok(request) => route(&request),
+        Ok(request) => route(&request, &config),
         Err(err) => {
             println!("error: {}", err);
             Response::bad_request()

@@ -1,10 +1,11 @@
 use crate::{
-    handlers::echo::Echo,
-    handlers::user_agent::UserAgent,
+    config::Config,
+    handlers::{echo::Echo, files::StaticFile, user_agent::UserAgent},
     http::{headers::Headers, request::Request, response::Response, status::StatusCode},
 };
 
 pub mod echo;
+pub mod files;
 pub mod user_agent;
 
 fn respond<T, E>(result: Result<T, E>) -> Response
@@ -18,7 +19,7 @@ where
     }
 }
 
-pub fn route(request: &Request) -> Response {
+pub fn route(request: &Request, config: &Config) -> Response {
     let path = request.path();
 
     let headers = Headers::default();
@@ -27,6 +28,10 @@ pub fn route(request: &Request) -> Response {
         "/" => Response::new(StatusCode::Ok, headers, String::new()),
         "/user-agent" => respond(UserAgent::try_from(request)),
         _ if path.starts_with("/echo/") => respond(Echo::try_from(path)),
+        _ if path.starts_with("/files/") => match config.directory() {
+            Some(directory) => respond(StaticFile::open(directory, path)),
+            None => Response::new(StatusCode::NotFound, headers, String::new()),
+        },
         _ => Response::new(StatusCode::NotFound, headers, String::new()),
     }
 }
@@ -34,8 +39,10 @@ pub fn route(request: &Request) -> Response {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::config::Config;
+    use crate::test_support::TempDir;
 
-    fn route_line(line: &str) -> Response {
+    fn route_line_with(config: &Config, line: &str) -> Response {
         let request: Request = match line.parse() {
             Ok(request) => request,
             Err(e) => {
@@ -43,7 +50,11 @@ mod test {
                 panic!();
             }
         };
-        route(&request)
+        route(&request, config)
+    }
+
+    fn route_line(line: &str) -> Response {
+        route_line_with(&Config::default(), line)
     }
 
     #[test]
@@ -179,6 +190,80 @@ mod test {
         assert_eq!(
             route_line("GET /user-agent/x HTTP/1.1\r\nUser-Agent: a/1\r\n\r\n").status(),
             &StatusCode::NotFound
+        );
+    }
+
+    // --- Files ---
+
+    fn config_for(dir: &TempDir) -> Config {
+        Config::from_args(vec!["--directory".to_string(), dir.path_str()]).unwrap()
+    }
+
+    fn dir_with_foo() -> TempDir {
+        let dir = TempDir::new();
+        dir.write("foo", "Hello, World!");
+        dir
+    }
+
+    #[test]
+    fn files_matches_spec_bytes() {
+        let dir = dir_with_foo();
+
+        assert_eq!(
+            String::from_utf8(
+                route_line_with(&config_for(&dir), "GET /files/foo HTTP/1.1").into_bytes()
+            )
+            .unwrap(),
+            "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 13\r\n\r\nHello, World!"
+        );
+    }
+
+    #[test]
+    fn files_missing_returns_404() {
+        let dir = dir_with_foo();
+
+        assert_eq!(
+            route_line_with(&config_for(&dir), "GET /files/non_existant_file HTTP/1.1").status(),
+            &StatusCode::NotFound
+        );
+    }
+
+    #[test]
+    fn files_without_configured_directory_returns_404() {
+        assert_eq!(
+            route_line("GET /files/foo HTTP/1.1").status(),
+            &StatusCode::NotFound
+        );
+    }
+
+    #[test]
+    fn files_without_trailing_slash_returns_404() {
+        let dir = dir_with_foo();
+
+        assert_eq!(
+            route_line_with(&config_for(&dir), "GET /files HTTP/1.1").status(),
+            &StatusCode::NotFound
+        );
+    }
+
+    #[test]
+    fn files_prefix_must_be_a_full_segment() {
+        let dir = dir_with_foo();
+        dir.write("filesfoo", "nope");
+
+        assert_eq!(
+            route_line_with(&config_for(&dir), "GET /filesfoo HTTP/1.1").status(),
+            &StatusCode::NotFound
+        );
+    }
+
+    #[test]
+    fn other_routes_still_work_with_directory() {
+        let dir = dir_with_foo();
+
+        assert_eq!(
+            route_line_with(&config_for(&dir), "GET /echo/abc HTTP/1.1").body(),
+            "abc"
         );
     }
 }

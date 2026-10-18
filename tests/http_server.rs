@@ -1,7 +1,9 @@
 //! Functional tests: spawn the real binary and talk to it over TCP.
 
+use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Barrier, Mutex, MutexGuard};
 use std::thread;
@@ -19,6 +21,10 @@ struct Server {
 
 impl Server {
     fn start() -> Self {
+        Self::start_with_args(&[])
+    }
+
+    fn start_with_args(args: &[&str]) -> Self {
         let lock = PORT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
         assert!(
@@ -27,6 +33,7 @@ impl Server {
         );
 
         let child = Command::new(env!("CARGO_BIN_EXE_codecrafters-http-server"))
+            .args(args)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -366,5 +373,110 @@ fn abandoned_connection_does_not_break_server() {
         let mut gone = connect();
         gone.write_all(b"GET / HT").unwrap();
     }
+    assert_eq!(get("/"), OK_EMPTY);
+}
+
+// --- Return a file ---
+
+// Unique directory under the system temp dir, removed on drop.
+struct TempDir {
+    path: PathBuf,
+}
+
+impl TempDir {
+    fn new(name: &str) -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "http-server-it-{}-{name}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        Self { path }
+    }
+
+    fn write(&self, name: &str, contents: &str) {
+        fs::write(self.path.join(name), contents).unwrap();
+    }
+
+    // Mirrors `--directory /tmp/`: the tester passes the directory with a trailing slash.
+    fn arg(&self) -> String {
+        format!("{}/", self.path.display())
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+const NOT_FOUND_EMPTY: &str = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+
+fn octet_stream_200(body: &str) -> String {
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+#[test]
+fn files_matches_spec_example() {
+    let dir = TempDir::new("spec");
+    dir.write("foo", "Hello, World!");
+    let _server = Server::start_with_args(&["--directory", &dir.arg()]);
+
+    assert_eq!(get("/files/foo"), octet_stream_200("Hello, World!"));
+}
+
+#[test]
+fn files_missing_responds_404() {
+    let dir = TempDir::new("missing");
+    let _server = Server::start_with_args(&["--directory", &dir.arg()]);
+
+    assert_eq!(get("/files/non_existant_file"), NOT_FOUND_EMPTY);
+}
+
+#[test]
+fn files_directory_without_trailing_slash() {
+    let dir = TempDir::new("no-slash");
+    dir.write("bar", "no slash");
+    let path = dir.path.display().to_string();
+    let _server = Server::start_with_args(&["--directory", &path]);
+
+    assert_eq!(get("/files/bar"), octet_stream_200("no slash"));
+}
+
+#[test]
+fn files_served_with_random_names_and_contents() {
+    let dir = TempDir::new("random");
+    let files = [
+        ("apple_banana", "mango grape"),
+        ("orange-123", "pineapple\nstrawberry"),
+        ("x", ""),
+    ];
+    for (name, contents) in files {
+        dir.write(name, contents);
+    }
+    let _server = Server::start_with_args(&["--directory", &dir.arg()]);
+
+    for (name, contents) in files {
+        assert_eq!(get(&format!("/files/{name}")), octet_stream_200(contents));
+    }
+}
+
+#[test]
+fn files_without_directory_flag_responds_404() {
+    let _server = Server::start();
+
+    assert_eq!(get("/files/foo"), NOT_FOUND_EMPTY);
+}
+
+#[test]
+fn files_and_other_routes_on_same_server() {
+    let dir = TempDir::new("mixed");
+    dir.write("foo", "Hello, World!");
+    let _server = Server::start_with_args(&["--directory", &dir.arg()]);
+
+    assert_eq!(get("/files/foo"), octet_stream_200("Hello, World!"));
+    assert_eq!(get("/echo/abc"), text_plain_200("abc"));
     assert_eq!(get("/"), OK_EMPTY);
 }
