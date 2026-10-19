@@ -136,7 +136,10 @@ fn handles_sequential_connections() {
 #[test]
 fn malformed_request_responds_400() {
     let _server = Server::start();
-    assert_eq!(send("garbage\r\n\r\n"), "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n");
+    assert_eq!(
+        send("garbage\r\n\r\n"),
+        "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n"
+    );
     assert_eq!(get("/"), "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
 }
 
@@ -385,16 +388,18 @@ struct TempDir {
 
 impl TempDir {
     fn new(name: &str) -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "http-server-it-{}-{name}",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("http-server-it-{}-{name}", std::process::id()));
         fs::create_dir_all(&path).unwrap();
         Self { path }
     }
 
     fn write(&self, name: &str, contents: &str) {
         fs::write(self.path.join(name), contents).unwrap();
+    }
+
+    fn read(&self, name: &str) -> String {
+        fs::read_to_string(self.path.join(name)).unwrap()
     }
 
     // Mirrors `--directory /tmp/`: the tester passes the directory with a trailing slash.
@@ -478,5 +483,188 @@ fn files_and_other_routes_on_same_server() {
 
     assert_eq!(get("/files/foo"), octet_stream_200("Hello, World!"));
     assert_eq!(get("/echo/abc"), text_plain_200("abc"));
+    assert_eq!(get("/"), OK_EMPTY);
+}
+
+// --- Read request body ---
+
+const CREATED_EMPTY: &str = "HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n";
+const BAD_REQUEST_EMPTY: &str = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
+
+// Same request as `curl -v --data "<body>" -H "Content-Type: application/octet-stream"`.
+fn post(path: &str, body: &str) -> String {
+    send(&format!(
+        "POST {path} HTTP/1.1\r\nHost: localhost:4221\r\nUser-Agent: curl/8.0\r\nAccept: */*\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    ))
+}
+
+// Sends each part in its own TCP write, with a pause in between,
+// so the server cannot receive the whole request in one read.
+fn send_in_parts(parts: &[&str]) -> String {
+    let mut stream = connect();
+    let (last, first) = parts.split_last().unwrap();
+    for part in first {
+        stream.write_all(part.as_bytes()).unwrap();
+        stream.flush().unwrap();
+        thread::sleep(Duration::from_millis(100));
+    }
+    send_on(stream, last)
+}
+
+// The client never closes its write side (like curl): reading the body
+// until EOF instead of Content-Length bytes makes these tests time out.
+
+#[test]
+fn post_file_matches_spec_example() {
+    let dir = TempDir::new("post-spec");
+    let _server = Server::start_with_args(&["--directory", &dir.arg()]);
+
+    assert_eq!(post("/files/file_123", "12345"), CREATED_EMPTY);
+    assert_eq!(dir.read("file_123"), "12345");
+}
+
+#[test]
+fn post_file_with_random_names_and_contents() {
+    let dir = TempDir::new("post-random");
+    let _server = Server::start_with_args(&["--directory", &dir.arg()]);
+    let files = [
+        ("apple_banana", "mango grape"),
+        ("orange-123", "pineapple strawberry raspberry"),
+        ("x", "y"),
+    ];
+
+    for (name, contents) in files {
+        assert_eq!(post(&format!("/files/{name}"), contents), CREATED_EMPTY);
+    }
+    for (name, contents) in files {
+        assert_eq!(dir.read(name), contents);
+    }
+}
+
+#[test]
+fn post_then_get_returns_contents() {
+    let dir = TempDir::new("post-get");
+    let _server = Server::start_with_args(&["--directory", &dir.arg()]);
+
+    assert_eq!(post("/files/round-trip", "there and back"), CREATED_EMPTY);
+    assert_eq!(get("/files/round-trip"), octet_stream_200("there and back"));
+}
+
+// The body is read by length, not by lines.
+#[test]
+fn post_body_may_contain_crlf_and_empty_lines() {
+    let dir = TempDir::new("post-crlf");
+    let _server = Server::start_with_args(&["--directory", &dir.arg()]);
+    let body = "line 1\r\nline 2\r\n\r\nafter an empty line\n";
+
+    assert_eq!(post("/files/lines", body), CREATED_EMPTY);
+    assert_eq!(dir.read("lines"), body);
+}
+
+#[test]
+fn post_with_empty_body_creates_empty_file() {
+    let dir = TempDir::new("post-empty");
+    let _server = Server::start_with_args(&["--directory", &dir.arg()]);
+
+    assert_eq!(post("/files/empty", ""), CREATED_EMPTY);
+    assert_eq!(dir.read("empty"), "");
+}
+
+// RFC 9112 §6.3 rule 7: no Content-Length on a request means a zero-length body.
+#[test]
+fn post_without_content_length_creates_empty_file() {
+    let dir = TempDir::new("post-no-length");
+    let _server = Server::start_with_args(&["--directory", &dir.arg()]);
+
+    assert_eq!(
+        send("POST /files/nolength HTTP/1.1\r\nHost: localhost:4221\r\n\r\n"),
+        CREATED_EMPTY
+    );
+    assert_eq!(dir.read("nolength"), "");
+}
+
+#[test]
+fn post_content_length_name_is_case_insensitive() {
+    let dir = TempDir::new("post-case");
+    let _server = Server::start_with_args(&["--directory", &dir.arg()]);
+
+    assert_eq!(
+        send("POST /files/lower HTTP/1.1\r\ncontent-length: 3\r\n\r\nabc"),
+        CREATED_EMPTY
+    );
+    assert_eq!(dir.read("lower"), "abc");
+}
+
+// The body arrives in a later TCP segment than the head.
+#[test]
+fn post_body_sent_after_headers() {
+    let dir = TempDir::new("post-split");
+    let _server = Server::start_with_args(&["--directory", &dir.arg()]);
+
+    assert_eq!(
+        send_in_parts(&[
+            "POST /files/split HTTP/1.1\r\nContent-Length: 10\r\n\r\n",
+            "hello",
+            "world",
+        ]),
+        CREATED_EMPTY
+    );
+    assert_eq!(dir.read("split"), "helloworld");
+}
+
+// Larger than `BufReader`'s default 8 KiB buffer.
+#[test]
+fn post_large_body() {
+    let dir = TempDir::new("post-large");
+    let _server = Server::start_with_args(&["--directory", &dir.arg()]);
+    let body: String = (0..20_000)
+        .map(|i| (b'a' + (i % 26) as u8) as char)
+        .collect();
+
+    assert_eq!(post("/files/large", &body), CREATED_EMPTY);
+    assert_eq!(dir.read("large"), body);
+}
+
+// RFC 9112 §6.3 rule 5: an invalid Content-Length is an unrecoverable error.
+#[test]
+fn post_invalid_content_length_responds_400() {
+    let dir = TempDir::new("post-invalid-length");
+    let _server = Server::start_with_args(&["--directory", &dir.arg()]);
+
+    assert_eq!(
+        send("POST /files/bad HTTP/1.1\r\nContent-Length: abc\r\n\r\n"),
+        BAD_REQUEST_EMPTY
+    );
+    assert!(!dir.path.join("bad").exists());
+    assert_eq!(get("/"), OK_EMPTY);
+}
+
+#[test]
+fn post_without_directory_flag_responds_404() {
+    let _server = Server::start();
+
+    assert_eq!(post("/files/foo", "12345"), NOT_FOUND_EMPTY);
+}
+
+#[test]
+fn post_cannot_escape_directory() {
+    let dir = TempDir::new("post-traversal");
+    let public = dir.path.join("public");
+    fs::create_dir_all(&public).unwrap();
+    let _server = Server::start_with_args(&["--directory", &format!("{}/", public.display())]);
+
+    assert_eq!(post("/files/../evil", "pwned"), NOT_FOUND_EMPTY);
+    assert!(!dir.path.join("evil").exists());
+}
+
+#[test]
+fn post_and_other_routes_on_same_server() {
+    let dir = TempDir::new("post-mixed");
+    let _server = Server::start_with_args(&["--directory", &dir.arg()]);
+
+    assert_eq!(post("/files/foo", "Hello, World!"), CREATED_EMPTY);
+    assert_eq!(get("/echo/abc"), text_plain_200("abc"));
+    assert_eq!(get("/files/foo"), octet_stream_200("Hello, World!"));
     assert_eq!(get("/"), OK_EMPTY);
 }

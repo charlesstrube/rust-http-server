@@ -32,20 +32,11 @@ impl From<ParseEchoError> for Response {
 impl TryFrom<String> for Echo {
     type Error = ParseEchoError;
     fn try_from(path: String) -> Result<Self, Self::Error> {
-        let parsed = path.strip_prefix("/echo/");
-
-        match parsed {
-            Some(content) => {
-                if content.is_empty() {
-                    return Err(ParseEchoError::NoContent);
-                }
-
-                Ok(Self {
-                    value: content.into(),
-                })
-            }
-            None => Err(ParseEchoError::NoContent),
+        if path.is_empty() {
+            return Err(ParseEchoError::NoContent);
         }
+
+        Ok(Self { value: path })
     }
 }
 
@@ -66,55 +57,33 @@ mod test {
 
     #[test]
     fn extracts_string_after_prefix() {
-        assert_eq!(echo("/echo/abc").value, "abc");
+        assert_eq!(echo("abc").value, "abc");
     }
 
     #[test]
     fn keeps_slashes_in_string() {
-        assert_eq!(echo("/echo/a/b/c").value, "a/b/c");
+        assert_eq!(echo("a/b/c").value, "a/b/c");
     }
 
     #[test]
     fn sets_content_type_text_plain() {
-        let response: Response = echo("/echo/abc").into();
+        let response: Response = echo("abc").into();
         assert_eq!(response.header("Content-Type"), Some("text/plain"));
     }
 
     #[test]
     fn parses_from_owned_string() {
-        assert_eq!(
-            Echo::try_from(String::from("/echo/abc")).unwrap().value,
-            "abc"
-        );
-    }
-
-    #[test]
-    fn rejects_path_without_echo_prefix() {
-        assert!(matches!(
-            Echo::try_from("/abc"),
-            Err(ParseEchoError::NoContent)
-        ));
-    }
-
-    #[test]
-    fn rejects_echo_without_trailing_slash() {
-        assert!(matches!(
-            Echo::try_from("/echo"),
-            Err(ParseEchoError::NoContent)
-        ));
+        assert_eq!(Echo::try_from(String::from("abc")).unwrap().value, "abc");
     }
 
     #[test]
     fn rejects_empty_string() {
-        assert!(matches!(
-            Echo::try_from("/echo/"),
-            Err(ParseEchoError::NoContent)
-        ));
+        assert!(matches!(Echo::try_from(""), Err(ParseEchoError::NoContent)));
     }
 
     #[test]
     fn converts_into_200_response() {
-        let response: Response = echo("/echo/abc").into();
+        let response: Response = echo("abc").into();
 
         assert_eq!(response.status(), &StatusCode::Ok);
         assert_eq!(response.body(), "abc");
@@ -122,7 +91,7 @@ mod test {
 
     #[test]
     fn response_has_content_type_and_length() {
-        let response: Response = echo("/echo/hello").into();
+        let response: Response = echo("hello").into();
 
         assert_eq!(response.header("Content-Type"), Some("text/plain"));
         assert_eq!(response.header("Content-Length"), Some("5"));

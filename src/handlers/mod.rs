@@ -1,7 +1,13 @@
 use crate::{
     config::Config,
-    handlers::{echo::Echo, files::StaticFile, user_agent::UserAgent},
-    http::{headers::Headers, request::Request, response::Response, status::StatusCode},
+    handlers::{
+        echo::Echo,
+        files::{CreatedFile, StaticFile},
+        user_agent::UserAgent,
+    },
+    http::{
+        headers::Headers, method::Method, request::Request, response::Response, status::StatusCode,
+    },
 };
 
 pub mod echo;
@@ -21,15 +27,28 @@ where
 
 pub fn route(request: &Request, config: &Config) -> Response {
     let path = request.path();
+    let method = request.method();
 
-    let headers = Headers::default();
+    if path == "/" {
+        return Response::new(StatusCode::Ok, Headers::default(), String::new());
+    }
 
-    match path {
-        "/" => Response::new(StatusCode::Ok, headers, String::new()),
-        "/user-agent" => respond(UserAgent::try_from(request)),
-        _ if path.starts_with("/echo/") => respond(Echo::try_from(path)),
-        _ if path.starts_with("/files/") => match config.directory() {
-            Some(directory) => respond(StaticFile::open(directory, path)),
+    let trimmed = path.trim_start_matches("/");
+
+    let (segment, rest) = match trimmed.split_once("/") {
+        Some((segment, rest)) => (segment, Some(rest)),
+        None => (trimmed, None),
+    };
+
+    match (segment, method, rest) {
+        ("user-agent", _, None) => respond(UserAgent::try_from(request)),
+        ("echo", Method::Get, Some(rest)) => respond(Echo::try_from(rest)),
+        ("files", Method::Get, Some(rest)) => match config.directory() {
+            Some(directory) => respond(StaticFile::open(directory, rest)),
+            None => Response::not_found(),
+        },
+        ("files", Method::Post, Some(rest)) => match config.directory() {
+            Some(directory) => respond(CreatedFile::create(directory, rest, request.body())),
             None => Response::not_found(),
         },
         _ => Response::not_found(),
@@ -265,5 +284,93 @@ mod test {
             route_line_with(&config_for(&dir), "GET /echo/abc HTTP/1.1").body(),
             "abc"
         );
+    }
+
+    // --- Files: POST ---
+
+    const SPEC_POST: &str = "POST /files/number HTTP/1.1\r\nHost: localhost:4221\r\nUser-Agent: curl/7.64.1\r\nAccept: */*\r\nContent-Type: application/octet-stream\r\nContent-Length: 5\r\n\r\n12345";
+
+    fn post_files(name: &str, body: &str) -> String {
+        format!(
+            "POST /files/{name} HTTP/1.1\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    #[test]
+    fn files_post_matches_spec_bytes() {
+        let dir = TempDir::new();
+
+        assert_eq!(
+            String::from_utf8(route_line_with(&config_for(&dir), SPEC_POST).into_bytes()).unwrap(),
+            "HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn files_post_writes_body_to_file() {
+        let dir = TempDir::new();
+
+        route_line_with(&config_for(&dir), SPEC_POST);
+
+        assert_eq!(dir.read("number"), "12345");
+    }
+
+    #[test]
+    fn files_post_then_get_returns_contents() {
+        let dir = TempDir::new();
+        let config = config_for(&dir);
+
+        route_line_with(&config, &post_files("file_123", "mango banana"));
+
+        assert_eq!(
+            route_line_with(&config, "GET /files/file_123 HTTP/1.1").body(),
+            "mango banana"
+        );
+    }
+
+    #[test]
+    fn files_post_without_configured_directory_returns_404() {
+        assert_eq!(route_line(SPEC_POST).status(), &StatusCode::NotFound);
+    }
+
+    #[test]
+    fn files_post_traversal_returns_404() {
+        let dir = TempDir::new();
+        let public = dir.mkdir("public");
+        let config = Config::from_args(vec![
+            "--directory".to_string(),
+            public.to_str().unwrap().to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            route_line_with(&config, &post_files("../evil", "pwned")).status(),
+            &StatusCode::NotFound
+        );
+        assert!(!dir.path().join("evil").exists());
+    }
+
+    // The method selects the handler: GET must never create anything.
+    #[test]
+    fn files_get_does_not_create_file() {
+        let dir = TempDir::new();
+
+        assert_eq!(
+            route_line_with(&config_for(&dir), "GET /files/ghost HTTP/1.1").status(),
+            &StatusCode::NotFound
+        );
+        assert!(!dir.path().join("ghost").exists());
+    }
+
+    // The method selects the handler: POST must never answer with the old contents.
+    #[test]
+    fn files_post_on_existing_file_does_not_return_contents() {
+        let dir = dir_with_foo();
+
+        let response = route_line_with(&config_for(&dir), &post_files("foo", "new"));
+
+        assert_eq!(response.status(), &StatusCode::Created);
+        assert_eq!(response.body(), "");
     }
 }

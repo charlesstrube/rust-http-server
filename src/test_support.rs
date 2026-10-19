@@ -13,10 +13,8 @@ pub struct TempDir {
 impl TempDir {
     pub fn new() -> Self {
         let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "http-server-unit-{}-{id}",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("http-server-unit-{}-{id}", std::process::id()));
         fs::create_dir_all(&path).unwrap();
         Self { path }
     }
@@ -31,6 +29,10 @@ impl TempDir {
 
     pub fn write(&self, name: &str, contents: &str) {
         fs::write(self.path.join(name), contents).unwrap();
+    }
+
+    pub fn read(&self, name: &str) -> String {
+        fs::read_to_string(self.path.join(name)).unwrap()
     }
 
     pub fn mkdir(&self, name: &str) -> PathBuf {
