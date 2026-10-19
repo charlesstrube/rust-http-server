@@ -19,6 +19,10 @@ impl Response {
         }
     }
 
+    pub fn not_found() -> Self {
+        Self::new(StatusCode::NotFound, Headers::default(), String::new())
+    }
+
     pub fn bad_request() -> Self {
         Self::new(StatusCode::BadRequest, Headers::default(), String::new())
     }

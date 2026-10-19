@@ -1,6 +1,5 @@
 use std::str::FromStr;
 
-use std::sync::Arc;
 use std::{
     io::{BufRead, BufReader},
     net::TcpStream,
@@ -13,7 +12,7 @@ use std::io::Write;
 
 use crate::http::request::Request;
 
-pub fn handle_connection(mut stream: TcpStream, config: Arc<Config>) {
+pub fn handle_connection(mut stream: TcpStream, config: &Config) {
     let mut head = String::new();
     let mut buffer = BufReader::new(&stream);
 
@@ -25,7 +24,7 @@ pub fn handle_connection(mut stream: TcpStream, config: Arc<Config>) {
                 }
             }
             Err(err) => {
-                println!("error: {}", err);
+                eprintln!("error: {}", err);
                 break;
             }
         };
@@ -34,7 +33,7 @@ pub fn handle_connection(mut stream: TcpStream, config: Arc<Config>) {
     let response = match Request::from_str(head.as_str()) {
         Ok(request) => route(&request, &config),
         Err(err) => {
-            println!("error: {}", err);
+            eprintln!("error: {}", err);
             Response::bad_request()
         }
     };
@@ -42,6 +41,6 @@ pub fn handle_connection(mut stream: TcpStream, config: Arc<Config>) {
     let result = stream.write_all(&response.into_bytes());
 
     if let Err(e) = result {
-        println!("error: {}", e);
+        eprintln!("error: {}", e);
     }
 }

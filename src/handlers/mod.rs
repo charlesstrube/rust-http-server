@@ -30,9 +30,9 @@ pub fn route(request: &Request, config: &Config) -> Response {
         _ if path.starts_with("/echo/") => respond(Echo::try_from(path)),
         _ if path.starts_with("/files/") => match config.directory() {
             Some(directory) => respond(StaticFile::open(directory, path)),
-            None => Response::new(StatusCode::NotFound, headers, String::new()),
+            None => Response::not_found(),
         },
-        _ => Response::new(StatusCode::NotFound, headers, String::new()),
+        _ => Response::not_found(),
     }
 }
 
@@ -46,7 +46,7 @@ mod test {
         let request: Request = match line.parse() {
             Ok(request) => request,
             Err(e) => {
-                println!("err: {}", e);
+                eprintln!("err: {}", e);
                 panic!();
             }
         };

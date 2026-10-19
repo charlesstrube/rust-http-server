@@ -1,18 +1,18 @@
 use std::path::PathBuf;
 
-#[derive(Default, Clone)]
+#[derive(Default)]
 pub struct Config {
     directory: Option<PathBuf>,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
-    #[error("Missing directory")]
+    #[error("--directory requires a value")]
     MissingDirectory,
 }
 
 impl Config {
-    pub fn from_args(args: Vec<String>) -> Result<Self, ConfigError> {
+    pub fn from_args(args: impl IntoIterator<Item = String>) -> Result<Self, ConfigError> {
         let mut args_loops = args.into_iter();
 
         while let Some(arg) = args_loops.next() {

@@ -74,14 +74,14 @@ impl StaticFile {
 }
 
 impl From<StaticFile> for Response {
-    fn from(echo: StaticFile) -> Self {
+    fn from(static_file: StaticFile) -> Self {
         Response::new(
             StatusCode::Ok,
             Headers::from(vec![(
                 String::from("Content-Type"),
                 String::from("application/octet-stream"),
             )]),
-            echo.value,
+            static_file.value,
         )
     }
 }
@@ -291,7 +291,7 @@ mod test {
         let public = dir.mkdir("public");
         let absolute = dir.path().join("secret");
 
-        println!("{}", &public.display());
+        eprintln!("{}", &public.display());
 
         assert_404(response(&public, &format!("/files/{}", absolute.display())));
     }
