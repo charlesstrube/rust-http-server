@@ -29,7 +29,7 @@ impl Request {
         path: &str,
         method: &str,
         headers: Headers,
-        body: String,
+        body: &str,
     ) -> Result<Self, RequestError> {
         let Ok(parsed_method) = Method::try_from(method) else {
             return Err(RequestError::InvalidMethod);
@@ -39,10 +39,11 @@ impl Request {
             path: path.into(),
             method: parsed_method,
             headers,
-            body,
+            body: body.into(),
         })
     }
 
+    #[cfg(test)]
     pub fn content_length(&self) -> Result<u32, RequestError> {
         match self.header("Content-Length") {
             Some(value) => match value.parse::<u32>() {
@@ -77,18 +78,25 @@ impl Request {
 
 impl FromStr for Request {
     type Err = RequestError;
-    fn from_str(line: &str) -> Result<Self, Self::Err> {
-        let (first_line, headers, body) = match line.split_once("\r\n") {
-            Some((first_line, header_lines)) => match header_lines.split_once("\r\n\r\n") {
-                Some((headers, body)) => {
+    fn from_str(head: &str) -> Result<Self, Self::Err> {
+        let (first_line, headers, body) = match head.split_once("\r\n\r\n") {
+            Some((rest, body)) => match rest.split_once("\r\n") {
+                Some((first_line, headers)) => {
                     (first_line, headers.parse::<Headers>(), String::from(body))
                 }
-                None => (first_line, header_lines.parse::<Headers>(), String::new()),
+                None => (head, Ok(Headers::default()), String::new()),
             },
-            None => (line, Ok(Headers::default()), String::new()),
+            None => match head.split_once("\r\n") {
+                Some((first_line, header_lines)) => {
+                    (first_line, header_lines.parse::<Headers>(), String::new())
+                }
+                None => (head, Ok(Headers::default()), String::new()),
+            },
         };
 
         let mut headers = headers?;
+
+        eprintln!("HEADERS -> \r\n{}", headers);
 
         headers.add("Content-Length", &body.len().to_string());
 
@@ -98,7 +106,7 @@ impl FromStr for Request {
             return Err(RequestError::CannotParse);
         };
 
-        Request::new(path, method, headers, body)
+        Request::new(path, method, headers, body.as_str())
     }
 }
 
@@ -158,13 +166,13 @@ mod test {
 
     #[test]
     fn new_builds_request() {
-        let request = Request::new("/echo/abc", "GET", Headers::default(), String::new()).unwrap();
+        let request = Request::new("/echo/abc", "GET", Headers::default(), "").unwrap();
         assert_eq!(request.path(), "/echo/abc");
     }
 
     #[test]
     fn new_rejects_unknown_method() {
-        let result = Request::new("/", "DELETE", Headers::default(), String::new());
+        let result = Request::new("/", "DELETE", Headers::default(), "");
         assert_eq!(result.err(), Some(RequestError::InvalidMethod));
     }
 
@@ -210,7 +218,7 @@ mod test {
 
     #[test]
     fn new_has_no_headers() {
-        let request = Request::new("/", "GET", Headers::default(), String::new()).unwrap();
+        let request = Request::new("/", "GET", Headers::default(), "").unwrap();
         assert_eq!(request.header("Host"), None);
     }
 
@@ -282,7 +290,7 @@ mod test {
 
     #[test]
     fn new_has_empty_body() {
-        let request = Request::new("/", "POST", Headers::default(), String::new()).unwrap();
+        let request = Request::new("/", "POST", Headers::default(), "").unwrap();
         assert_eq!(request.body(), "");
     }
 

@@ -40,6 +40,8 @@ pub fn route(request: &Request, config: &Config) -> Response {
         None => (trimmed, None),
     };
 
+    println!("--------body: {}", request.body());
+
     match (segment, method, rest) {
         ("user-agent", _, None) => respond(UserAgent::try_from(request)),
         ("echo", Method::Get, Some(rest)) => respond(Echo::try_from(rest)),
