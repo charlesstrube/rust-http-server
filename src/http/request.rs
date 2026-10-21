@@ -86,18 +86,13 @@ impl Request {
 impl FromStr for Request {
     type Err = RequestError;
     fn from_str(head: &str) -> Result<Self, Self::Err> {
-        println!("----HEAD: {}", head);
-
         let (first_line, headers, body) = match head.split_once("\r\n\r\n") {
-            Some((rest, body)) => {
-                println!("------ BODY PARSED: {}", body);
-                match rest.split_once("\r\n") {
-                    Some((first_line, headers)) => {
-                        (first_line, headers.parse::<Headers>()?, String::from(body))
-                    }
-                    None => (head, Headers::default(), String::new()),
+            Some((rest, body)) => match rest.split_once("\r\n") {
+                Some((first_line, headers)) => {
+                    (first_line, headers.parse::<Headers>()?, String::from(body))
                 }
-            }
+                None => (head, Headers::default(), String::new()),
+            },
             None => match head.split_once("\r\n") {
                 Some((first_line, header_lines)) => {
                     (first_line, header_lines.parse::<Headers>()?, String::new())
@@ -105,8 +100,6 @@ impl FromStr for Request {
                 None => (head, Headers::default(), String::new()),
             },
         };
-
-        // eprintln!("HEADERS -> \r\n{}", headers);
 
         let mut parts = first_line.split_whitespace();
 

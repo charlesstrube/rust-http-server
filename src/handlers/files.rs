@@ -39,7 +39,6 @@ impl From<StaticFileError> for Response {
 
 impl From<io::Error> for StaticFileError {
     fn from(_error: io::Error) -> Self {
-        println!("----------error:{}", _error.kind());
         match _error.kind() {
             // file does not exist
             io::ErrorKind::NotFound
@@ -454,10 +453,7 @@ mod test {
     fn create_response(dir: &std::path::Path, path: &str, contents: &str) -> Response {
         match CreatedFile::create(dir, path, contents) {
             Ok(file) => file.into(),
-            Err(error) => {
-                println!("-----> err");
-                error.into()
-            }
+            Err(error) => error.into(),
         }
     }
 

@@ -88,6 +88,14 @@ mod test {
     }
 
     #[test]
+    fn path_without_leading_slash_returns_400() {
+        assert_eq!(
+            route_line("GET abc HTTP/1.1").status(),
+            &StatusCode::BadRequest
+        );
+    }
+
+    #[test]
     fn nested_unknown_path_returns_404() {
         assert_eq!(
             route_line("GET /a/b/c HTTP/1.1").status(),
