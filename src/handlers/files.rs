@@ -154,9 +154,8 @@ impl CreatedFile {
             .truncate(true)
             .open(target)?;
 
-        eprintln!("file");
         file.write_all(contents.as_bytes())?;
-        eprintln!("write");
+
         Ok(CreatedFile {})
     }
 }
@@ -454,10 +453,7 @@ mod test {
 
     fn create_response(dir: &std::path::Path, path: &str, contents: &str) -> Response {
         match CreatedFile::create(dir, path, contents) {
-            Ok(file) => {
-                println!("-----> file");
-                file.into()
-            }
+            Ok(file) => file.into(),
             Err(error) => {
                 println!("-----> err");
                 error.into()

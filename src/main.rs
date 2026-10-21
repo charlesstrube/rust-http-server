@@ -11,6 +11,7 @@ use std::{net::TcpListener, process::exit, sync::Arc, thread};
 use crate::{config::Config, server::handle_connection};
 
 fn main() {
+    println!("----test-----");
     let args = std::env::args().skip(1);
 
     let config = Config::from_args(args);

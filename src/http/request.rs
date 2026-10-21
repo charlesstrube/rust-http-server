@@ -1,4 +1,4 @@
-use std::str::FromStr;
+use std::{io, str::FromStr};
 
 use crate::http::{
     headers::{Headers, ParseHeadersError},
@@ -18,10 +18,14 @@ pub enum RequestError {
     InvalidMethod,
     #[error("Cannot Parse")]
     CannotParse,
+    #[error("Invalid Body")]
+    InvalidBody,
     #[error("Invalid Content Length")]
     InvalidContentLength,
     #[error(transparent)]
     InvalidHeader(#[from] ParseHeadersError),
+    #[error("I/O error")]
+    Io(String),
 }
 
 impl Request {
@@ -43,14 +47,17 @@ impl Request {
         })
     }
 
-    #[cfg(test)]
-    pub fn content_length(&self) -> Result<u32, RequestError> {
+    pub fn set_body(&mut self, body: String) {
+        self.body = body;
+    }
+
+    pub fn content_length(&self) -> Result<usize, RequestError> {
         match self.header("Content-Length") {
-            Some(value) => match value.parse::<u32>() {
+            Some(value) => match value.parse::<usize>() {
                 Ok(int) => Ok(int),
                 Err(_) => Err(RequestError::InvalidContentLength),
             },
-            None => Err(RequestError::InvalidContentLength),
+            None => Ok(0),
         }
     }
 
@@ -79,26 +86,27 @@ impl Request {
 impl FromStr for Request {
     type Err = RequestError;
     fn from_str(head: &str) -> Result<Self, Self::Err> {
+        println!("----HEAD: {}", head);
+
         let (first_line, headers, body) = match head.split_once("\r\n\r\n") {
-            Some((rest, body)) => match rest.split_once("\r\n") {
-                Some((first_line, headers)) => {
-                    (first_line, headers.parse::<Headers>(), String::from(body))
+            Some((rest, body)) => {
+                println!("------ BODY PARSED: {}", body);
+                match rest.split_once("\r\n") {
+                    Some((first_line, headers)) => {
+                        (first_line, headers.parse::<Headers>()?, String::from(body))
+                    }
+                    None => (head, Headers::default(), String::new()),
                 }
-                None => (head, Ok(Headers::default()), String::new()),
-            },
+            }
             None => match head.split_once("\r\n") {
                 Some((first_line, header_lines)) => {
-                    (first_line, header_lines.parse::<Headers>(), String::new())
+                    (first_line, header_lines.parse::<Headers>()?, String::new())
                 }
-                None => (head, Ok(Headers::default()), String::new()),
+                None => (head, Headers::default(), String::new()),
             },
         };
 
-        let mut headers = headers?;
-
-        eprintln!("HEADERS -> \r\n{}", headers);
-
-        headers.add("Content-Length", &body.len().to_string());
+        // eprintln!("HEADERS -> \r\n{}", headers);
 
         let mut parts = first_line.split_whitespace();
 

@@ -1,5 +1,6 @@
 use crate::http::HTTP_VERSION;
 use crate::http::headers::Headers;
+use crate::http::request::RequestError;
 use crate::http::status::StatusCode;
 
 pub struct Response {
@@ -51,6 +52,12 @@ impl Response {
     #[cfg(test)]
     pub fn body(&self) -> &str {
         &self.body
+    }
+}
+
+impl From<RequestError> for Response {
+    fn from(_: RequestError) -> Self {
+        Response::bad_request()
     }
 }
 
