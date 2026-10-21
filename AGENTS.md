@@ -54,7 +54,7 @@ Base stages
 - [x] Read header
 - [x] Concurrent connections
 - [x] Return a file
-- [ ] Read request body
+- [x] Read request body
 
 HTTP Compression
 

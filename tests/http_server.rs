@@ -668,3 +668,152 @@ fn post_and_other_routes_on_same_server() {
     assert_eq!(get("/files/foo"), octet_stream_200("Hello, World!"));
     assert_eq!(get("/"), OK_EMPTY);
 }
+
+// --- Compression -----------------------------------------------------------
+
+// A gzip body is not valid UTF-8, so these tests read raw bytes instead of `send`.
+struct RawResponse {
+    head: String,
+    body: Vec<u8>,
+}
+
+impl RawResponse {
+    fn status_line(&self) -> &str {
+        self.head.lines().next().unwrap_or("")
+    }
+
+    // RFC 9110 §5.1: field names are case-insensitive.
+    fn header(&self, name: &str) -> Option<&str> {
+        self.head.split("\r\n").skip(1).find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            key.eq_ignore_ascii_case(name).then(|| value.trim())
+        })
+    }
+}
+
+fn get_raw(path: &str, headers: &str) -> RawResponse {
+    let mut stream = connect();
+    stream
+        .write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost:4221\r\n{headers}\r\n").as_bytes())
+        .unwrap();
+
+    let mut bytes = Vec::new();
+    stream
+        .read_to_end(&mut bytes)
+        .expect("no response in time: is another connection blocking the server?");
+
+    let split = bytes
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .expect("response has no end of headers");
+
+    RawResponse {
+        head: String::from_utf8(bytes[..split].to_vec()).expect("headers are not valid UTF-8"),
+        body: bytes[split + 4..].to_vec(),
+    }
+}
+
+fn gunzip(bytes: &[u8]) -> String {
+    let mut decoded = String::new();
+    flate2::read::GzDecoder::new(bytes)
+        .read_to_string(&mut decoded)
+        .expect("body is not valid gzip");
+    decoded
+}
+
+// Stage "Compression headers"
+
+#[test]
+fn gzip_accepted_sets_content_encoding() {
+    let _server = Server::start();
+    let response = get_raw("/echo/abc", "Accept-Encoding: gzip\r\n");
+
+    assert_eq!(response.status_line(), "HTTP/1.1 200 OK");
+    assert_eq!(response.header("Content-Type"), Some("text/plain"));
+    assert_eq!(response.header("Content-Encoding"), Some("gzip"));
+}
+
+#[test]
+fn unsupported_encoding_has_no_content_encoding() {
+    let _server = Server::start();
+    let response = get_raw("/echo/abc", "Accept-Encoding: invalid-encoding\r\n");
+
+    assert_eq!(response.status_line(), "HTTP/1.1 200 OK");
+    assert_eq!(response.header("Content-Encoding"), None);
+    assert_eq!(response.body, b"abc");
+}
+
+#[test]
+fn no_accept_encoding_has_no_content_encoding() {
+    let _server = Server::start();
+    let response = get_raw("/echo/abc", "");
+
+    assert_eq!(response.header("Content-Encoding"), None);
+    assert_eq!(response.body, b"abc");
+}
+
+// Stage "Multiple compression schemes" (RFC 9110 §12.5.3: comma-separated list)
+
+#[test]
+fn gzip_found_in_list() {
+    let _server = Server::start();
+    let response = get_raw("/echo/abc", "Accept-Encoding: invalid1, gzip, invalid2\r\n");
+
+    assert_eq!(response.header("Content-Encoding"), Some("gzip"));
+}
+
+#[test]
+fn gzip_found_without_spaces() {
+    let _server = Server::start();
+    let response = get_raw("/echo/abc", "Accept-Encoding: invalid1,gzip\r\n");
+
+    assert_eq!(response.header("Content-Encoding"), Some("gzip"));
+}
+
+#[test]
+fn list_without_gzip_has_no_content_encoding() {
+    let _server = Server::start();
+    let response = get_raw("/echo/abc", "Accept-Encoding: invalid1, invalid2\r\n");
+
+    assert_eq!(response.header("Content-Encoding"), None);
+    assert_eq!(response.body, b"abc");
+}
+
+// Beyond CodeCrafters: RFC 9110 §8.4.1, content codings are case-insensitive.
+#[test]
+fn encoding_name_is_case_insensitive() {
+    let _server = Server::start();
+    let response = get_raw("/echo/abc", "Accept-Encoding: GZip\r\n");
+
+    assert_eq!(response.header("Content-Encoding"), Some("gzip"));
+}
+
+// Stage "Gzip compression"
+
+#[test]
+fn gzip_body_decompresses_to_original() {
+    let _server = Server::start();
+    let response = get_raw("/echo/abc", "Accept-Encoding: gzip\r\n");
+
+    assert_eq!(gunzip(&response.body), "abc");
+}
+
+// RFC 9112 §6.3: Content-Length counts the bytes on the wire, i.e. the compressed ones.
+#[test]
+fn content_length_matches_compressed_body() {
+    let _server = Server::start();
+    let response = get_raw("/echo/abc", "Accept-Encoding: gzip\r\n");
+
+    assert_eq!(
+        response.header("Content-Length"),
+        Some(response.body.len().to_string().as_str())
+    );
+}
+
+#[test]
+fn gzip_and_plain_on_same_server() {
+    let _server = Server::start();
+
+    assert_eq!(gunzip(&get_raw("/echo/abc", "Accept-Encoding: gzip\r\n").body), "abc");
+    assert_eq!(get("/echo/abc"), text_plain_200("abc"));
+}

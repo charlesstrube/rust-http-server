@@ -6,13 +6,13 @@ use crate::http::status::StatusCode;
 pub struct Response {
     status: StatusCode,
     headers: Headers,
-    body: String,
+    body: Vec<u8>,
 }
 
 impl Response {
-    pub fn new(status: StatusCode, mut headers: Headers, body: String) -> Self {
-        let len = body.len();
-        headers.set("Content-Length", &len.to_string());
+    pub fn new(status: StatusCode, mut headers: Headers, body: impl Into<Vec<u8>>) -> Self {
+        let body = body.into();
+        headers.set("Content-Length", &body.len().to_string());
         Self {
             status,
             headers,
@@ -21,27 +21,15 @@ impl Response {
     }
 
     pub fn not_found() -> Self {
-        Self::new(StatusCode::NotFound, Headers::default(), String::new())
+        Self::new(StatusCode::NotFound, Headers::default(), vec![])
     }
 
     pub fn bad_request() -> Self {
-        Self::new(StatusCode::BadRequest, Headers::default(), String::new())
+        Self::new(StatusCode::BadRequest, Headers::default(), vec![])
     }
 
     pub fn status(&self) -> &StatusCode {
         &self.status
-    }
-
-    pub fn into_bytes(self) -> Vec<u8> {
-        let formatted = format!(
-            "{} {}\r\n{}\r\n{}",
-            HTTP_VERSION,
-            self.status(),
-            self.headers,
-            self.body
-        );
-
-        formatted.into_bytes()
     }
 
     #[cfg(test)]
@@ -51,7 +39,15 @@ impl Response {
 
     #[cfg(test)]
     pub fn body(&self) -> &str {
-        &self.body
+        std::str::from_utf8(&self.body).expect("body is not valid UTF-8")
+    }
+
+    pub fn into_bytes(self) -> Vec<u8> {
+        let head = format!("{} {}\r\n{}\r\n", HTTP_VERSION, self.status, self.headers);
+
+        let mut bytes = head.into_bytes();
+        bytes.extend_from_slice(&self.body);
+        bytes
     }
 }
 
@@ -66,7 +62,7 @@ mod test {
     use super::*;
 
     fn empty(status: StatusCode) -> Response {
-        Response::new(status, Headers::default(), String::new())
+        Response::new(status, Headers::default(), vec![])
     }
 
     // Compare as text so assertion failures show readable `\r\n` instead of byte arrays.
@@ -105,7 +101,7 @@ mod test {
 
         headers.add("Content-Type", "text/plain");
 
-        Response::new(StatusCode::Ok, headers, body.into())
+        Response::new(StatusCode::Ok, headers, body.as_bytes())
     }
 
     #[test]
@@ -143,7 +139,7 @@ mod test {
         let mut headers = Headers::default();
         headers.add("Content-Length", "999");
 
-        let response = Response::new(StatusCode::Ok, headers, "abc".into());
+        let response = Response::new(StatusCode::Ok, headers, "abc".as_bytes());
 
         assert_eq!(response.header("Content-Length"), Some("3"));
         assert_eq!(
@@ -172,5 +168,35 @@ mod test {
             serialized(text_plain("abc")),
             "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 3\r\n\r\nabc"
         );
+    }
+
+    // Not valid UTF-8: 0xff never appears in UTF-8, 0x1f 0x8b is the gzip magic number.
+    const BINARY: [u8; 4] = [0xff, 0x00, 0x1f, 0x8b];
+
+    fn binary() -> Response {
+        Response::new(StatusCode::Ok, Headers::default(), BINARY.to_vec())
+    }
+
+    #[test]
+    fn content_length_counts_binary_bytes() {
+        assert_eq!(binary().header("Content-Length"), Some("4"));
+    }
+
+    // Compared as bytes: the output is not valid UTF-8, so `serialized` would panic.
+    #[test]
+    fn serializes_binary_body_unchanged() {
+        let mut expected = b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\n".to_vec();
+        expected.extend_from_slice(&BINARY);
+
+        assert_eq!(binary().into_bytes(), expected);
+    }
+
+    // RFC 9112 §6.3: the announced length must match the bytes actually sent.
+    #[test]
+    fn sent_body_length_matches_content_length() {
+        let bytes = binary().into_bytes();
+        let body_start = bytes.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+
+        assert_eq!(bytes.len() - body_start, 4);
     }
 }
