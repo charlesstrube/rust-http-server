@@ -1,4 +1,4 @@
-use std::{io, str::FromStr};
+use std::str::FromStr;
 
 use crate::http::{
     headers::{Headers, ParseHeadersError},

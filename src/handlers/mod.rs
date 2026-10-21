@@ -29,11 +29,9 @@ pub fn route(request: &Request, config: &Config) -> Response {
     let path = request.path();
     let method = request.method();
 
-    if path == "/" {
-        return Response::new(StatusCode::Ok, Headers::default(), String::new());
-    }
-
-    let trimmed = path.trim_start_matches("/");
+    let Some(trimmed) = path.strip_prefix('/') else {
+        return Response::bad_request();
+    };
 
     let (segment, rest) = match trimmed.split_once("/") {
         Some((segment, rest)) => (segment, Some(rest)),
@@ -41,14 +39,14 @@ pub fn route(request: &Request, config: &Config) -> Response {
     };
 
     match (segment, method, rest) {
-        ("user-agent", _, None) => respond(UserAgent::try_from(request)),
+        ("", Method::Get, None) => Response::new(StatusCode::Ok, Headers::default(), String::new()),
+        ("user-agent", Method::Get, None) => respond(UserAgent::try_from(request)),
         ("echo", Method::Get, Some(rest)) => respond(Echo::try_from(rest)),
-        ("files", Method::Get, Some(rest)) => match config.directory() {
-            Some(directory) => respond(StaticFile::open(directory, rest)),
-            None => Response::not_found(),
-        },
-        ("files", Method::Post, Some(rest)) => match config.directory() {
-            Some(directory) => respond(CreatedFile::create(directory, rest, request.body())),
+        ("files", method, Some(rest)) => match config.directory() {
+            Some(directory) => match method {
+                Method::Get => respond(StaticFile::open(directory, rest)),
+                Method::Post => respond(CreatedFile::create(directory, rest, request.body())),
+            },
             None => Response::not_found(),
         },
         _ => Response::not_found(),
