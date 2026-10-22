@@ -1,6 +1,7 @@
 use std::str::FromStr;
 
 use crate::http::{
+    encoding::Encoding,
     headers::{Headers, ParseHeadersError},
     method::Method,
 };
@@ -59,6 +60,13 @@ impl Request {
             },
             None => Ok(0),
         }
+    }
+
+    pub fn accept_encoding(&self) -> Option<Encoding> {
+        self.header("Accept-Encoding")?
+            .split(',')
+            .map(str::trim)
+            .find_map(|coding| coding.parse().ok())
     }
 
     pub fn path(&self) -> &str {

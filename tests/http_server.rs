@@ -694,7 +694,9 @@ impl RawResponse {
 fn get_raw(path: &str, headers: &str) -> RawResponse {
     let mut stream = connect();
     stream
-        .write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost:4221\r\n{headers}\r\n").as_bytes())
+        .write_all(
+            format!("GET {path} HTTP/1.1\r\nHost: localhost:4221\r\n{headers}\r\n").as_bytes(),
+        )
         .unwrap();
 
     let mut bytes = Vec::new();
@@ -739,6 +741,7 @@ fn unsupported_encoding_has_no_content_encoding() {
     let response = get_raw("/echo/abc", "Accept-Encoding: invalid-encoding\r\n");
 
     assert_eq!(response.status_line(), "HTTP/1.1 200 OK");
+    assert_eq!(response.header("Content-Type"), Some("text/plain"));
     assert_eq!(response.header("Content-Encoding"), None);
     assert_eq!(response.body, b"abc");
 }
@@ -750,6 +753,26 @@ fn no_accept_encoding_has_no_content_encoding() {
 
     assert_eq!(response.header("Content-Encoding"), None);
     assert_eq!(response.body, b"abc");
+}
+
+// Mirrors the tester: curl-like headers, both requests against the same server.
+#[test]
+fn compression_headers_matches_spec_example() {
+    let _server = Server::start();
+    const CURL: &str = "User-Agent: curl/7.81.0\r\nAccept: */*\r\n";
+
+    let gzip = get_raw("/echo/abc", &format!("{CURL}Accept-Encoding: gzip\r\n"));
+    assert_eq!(gzip.status_line(), "HTTP/1.1 200 OK");
+    assert_eq!(gzip.header("Content-Type"), Some("text/plain"));
+    assert_eq!(gzip.header("Content-Encoding"), Some("gzip"));
+
+    let invalid = get_raw(
+        "/echo/abc",
+        &format!("{CURL}Accept-Encoding: invalid-encoding\r\n"),
+    );
+    assert_eq!(invalid.status_line(), "HTTP/1.1 200 OK");
+    assert_eq!(invalid.header("Content-Type"), Some("text/plain"));
+    assert_eq!(invalid.header("Content-Encoding"), None);
 }
 
 // Stage "Multiple compression schemes" (RFC 9110 §12.5.3: comma-separated list)
@@ -814,6 +837,9 @@ fn content_length_matches_compressed_body() {
 fn gzip_and_plain_on_same_server() {
     let _server = Server::start();
 
-    assert_eq!(gunzip(&get_raw("/echo/abc", "Accept-Encoding: gzip\r\n").body), "abc");
+    assert_eq!(
+        gunzip(&get_raw("/echo/abc", "Accept-Encoding: gzip\r\n").body),
+        "abc"
+    );
     assert_eq!(get("/echo/abc"), text_plain_200("abc"));
 }

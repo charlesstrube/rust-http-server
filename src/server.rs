@@ -45,7 +45,13 @@ pub fn handle_connection(mut stream: TcpStream, config: &Config) {
     let mut buffer = BufReader::new(&stream);
 
     let response: Response = match read_request(&mut buffer) {
-        Ok(request) => route(&request, config),
+        Ok(request) => {
+            let mut response = route(&request, config);
+
+            response.set_encoding(request.accept_encoding());
+
+            response
+        }
         Err(err) => {
             eprintln!("error: {err}");
             err.into()

@@ -58,7 +58,7 @@ Base stages
 
 HTTP Compression
 
-- [ ] Compression headers
+- [x] Compression headers
 - [ ] Multiple compression schemes
 - [ ] Gzip compression
 

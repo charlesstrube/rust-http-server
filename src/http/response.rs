@@ -1,7 +1,12 @@
-use crate::http::HTTP_VERSION;
+use flate2::Compression;
+use flate2::write::GzEncoder;
+use std::io::Write;
+
+use crate::http::encoding::Encoding;
 use crate::http::headers::Headers;
 use crate::http::request::RequestError;
 use crate::http::status::StatusCode;
+use crate::http::{HTTP_VERSION, encoding};
 
 pub struct Response {
     status: StatusCode,
@@ -28,8 +33,31 @@ impl Response {
         Self::new(StatusCode::BadRequest, Headers::default(), vec![])
     }
 
+    #[cfg(test)]
     pub fn status(&self) -> &StatusCode {
         &self.status
+    }
+
+    pub fn set_encoding(&mut self, encoding: Option<Encoding>) {
+        match encoding {
+            Some(Encoding::Gzip) => {
+                let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+                encoder.write_all(&self.body).unwrap();
+
+                match encoder.finish() {
+                    Ok(result) => self.body = result,
+                    Err(error) => {
+                        eprintln!("error: {}", error);
+
+                        return;
+                    }
+                }
+                self.headers
+                    .set("Content-Length", &self.body.len().to_string());
+                self.headers.set("Content-Encoding", Encoding::Gzip.into());
+            }
+            None => (),
+        }
     }
 
     #[cfg(test)]
