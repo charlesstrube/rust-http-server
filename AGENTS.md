@@ -60,7 +60,7 @@ HTTP Compression
 
 - [x] Compression headers
 - [x] Multiple compression schemes
-- [ ] Gzip compression
+- [x] Gzip compression
 
 Persistent Connections
 
