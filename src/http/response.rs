@@ -2,11 +2,11 @@ use flate2::Compression;
 use flate2::write::GzEncoder;
 use std::io::Write;
 
+use crate::http::HTTP_VERSION;
 use crate::http::encoding::Encoding;
 use crate::http::headers::Headers;
 use crate::http::request::RequestError;
 use crate::http::status::StatusCode;
-use crate::http::{HTTP_VERSION, encoding};
 
 pub struct Response {
     status: StatusCode,
