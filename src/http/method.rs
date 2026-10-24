@@ -54,7 +54,10 @@ mod test {
 
     #[test]
     fn parses_from_owned_string() {
-        assert!(matches!(Method::try_from(String::from("GET")), Ok(Method::Get)));
+        assert!(matches!(
+            Method::try_from(String::from("GET")),
+            Ok(Method::Get)
+        ));
     }
 
     #[test]

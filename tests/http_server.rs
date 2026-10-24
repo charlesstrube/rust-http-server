@@ -1,8 +1,8 @@
 //! Functional tests: spawn the real binary and talk to it over TCP.
 
 use std::fs;
-use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{Shutdown, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Barrier, Mutex, MutexGuard};
@@ -64,15 +64,86 @@ fn connect() -> TcpStream {
     stream
 }
 
-// Writes `raw` on an already-open connection and reads until the server closes it.
-fn send_on(mut stream: TcpStream, raw: &str) -> String {
-    stream.write_all(raw.as_bytes()).unwrap();
+// Reads exactly one response, framed by its Content-Length (RFC 9112 §6.3),
+// so it works whether or not the server keeps the connection open afterwards.
+fn read_response(reader: &mut impl BufRead) -> RawResponse {
+    let mut head = String::new();
+    while !head.ends_with("\r\n\r\n") {
+        let read = reader
+            .read_line(&mut head)
+            .expect("no response in time: is another connection blocking the server?");
+        assert!(
+            read > 0,
+            "connection closed before the end of the response headers (got {head:?})"
+        );
+    }
+    head.truncate(head.len() - 4);
 
-    let mut response = Vec::new();
-    stream
-        .read_to_end(&mut response)
-        .expect("no response in time: is another connection blocking the server?");
-    String::from_utf8(response).expect("response is not valid UTF-8")
+    let mut response = RawResponse {
+        head,
+        body: Vec::new(),
+    };
+    let length: usize = response
+        .header("Content-Length")
+        .expect("response has no Content-Length")
+        .parse()
+        .expect("Content-Length is not a number");
+
+    response.body = vec![0; length];
+    reader
+        .read_exact(&mut response.body)
+        .expect("connection closed before the end of the body");
+    response
+}
+
+// One TCP connection reused for several requests, like `curl --next`.
+struct Connection {
+    // Kept for the whole connection: bytes of the next response may already be buffered.
+    reader: BufReader<TcpStream>,
+}
+
+impl Connection {
+    fn open() -> Self {
+        Self::from_stream(connect())
+    }
+
+    fn from_stream(stream: TcpStream) -> Self {
+        Self {
+            reader: BufReader::new(stream),
+        }
+    }
+
+    fn write(&mut self, raw: &str) {
+        self.reader.get_mut().write_all(raw.as_bytes()).unwrap();
+    }
+
+    fn read_response(&mut self) -> RawResponse {
+        read_response(&mut self.reader)
+    }
+
+    fn send(&mut self, raw: &str) -> String {
+        self.write(raw);
+        self.read_response().into_text()
+    }
+
+    // Half-close, like a client that has nothing more to send.
+    fn shutdown_write(&self) {
+        self.reader.get_ref().shutdown(Shutdown::Write).unwrap();
+    }
+
+    // Everything the server sends until it closes the connection.
+    fn read_until_closed(mut self) -> Vec<u8> {
+        let mut rest = Vec::new();
+        self.reader
+            .read_to_end(&mut rest)
+            .expect("server did not close the connection in time");
+        rest
+    }
+}
+
+// Writes `raw` on an already-open connection and reads one response.
+fn send_on(stream: TcpStream, raw: &str) -> String {
+    Connection::from_stream(stream).send(raw)
 }
 
 fn send(raw: &str) -> String {
@@ -689,30 +760,19 @@ impl RawResponse {
             key.eq_ignore_ascii_case(name).then(|| value.trim())
         })
     }
+
+    fn into_text(self) -> String {
+        let body = String::from_utf8(self.body).expect("response is not valid UTF-8");
+        format!("{}\r\n\r\n{body}", self.head)
+    }
 }
 
 fn get_raw(path: &str, headers: &str) -> RawResponse {
-    let mut stream = connect();
-    stream
-        .write_all(
-            format!("GET {path} HTTP/1.1\r\nHost: localhost:4221\r\n{headers}\r\n").as_bytes(),
-        )
-        .unwrap();
-
-    let mut bytes = Vec::new();
-    stream
-        .read_to_end(&mut bytes)
-        .expect("no response in time: is another connection blocking the server?");
-
-    let split = bytes
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .expect("response has no end of headers");
-
-    RawResponse {
-        head: String::from_utf8(bytes[..split].to_vec()).expect("headers are not valid UTF-8"),
-        body: bytes[split + 4..].to_vec(),
-    }
+    let mut connection = Connection::open();
+    connection.write(&format!(
+        "GET {path} HTTP/1.1\r\nHost: localhost:4221\r\n{headers}\r\n"
+    ));
+    connection.read_response()
 }
 
 fn gunzip(bytes: &[u8]) -> String {
@@ -842,4 +902,212 @@ fn gzip_and_plain_on_same_server() {
         "abc"
     );
     assert_eq!(get("/echo/abc"), text_plain_200("abc"));
+}
+
+// --- Persistent connections -------------------------------------------------
+// RFC 9112 §9.3: an HTTP/1.1 connection stays open unless `Connection: close` is sent.
+
+fn curl_get(path: &str, user_agent: &str) -> String {
+    format!(
+        "GET {path} HTTP/1.1\r\nHost: localhost:4221\r\nUser-Agent: {user_agent}\r\nAccept: */*\r\n\r\n"
+    )
+}
+
+// Mirrors `curl --http1.1 http://localhost:4221/echo/banana --next http://localhost:4221/user-agent -H "User-Agent: blueberry/apple-blueberry"`.
+#[test]
+fn persistent_matches_spec_example() {
+    let _server = Server::start();
+    let mut connection = Connection::open();
+
+    assert_eq!(
+        connection.send(&curl_get("/echo/banana", "curl/8.0")),
+        text_plain_200("banana")
+    );
+    assert_eq!(
+        connection.send(&curl_get("/user-agent", "blueberry/apple-blueberry")),
+        text_plain_200("blueberry/apple-blueberry")
+    );
+}
+
+#[test]
+fn many_requests_on_same_connection() {
+    let _server = Server::start();
+    let mut connection = Connection::open();
+
+    for i in 0..5 {
+        assert_eq!(
+            connection.send(&format!("GET /echo/{i} HTTP/1.1\r\n\r\n")),
+            text_plain_200(&i.to_string())
+        );
+    }
+}
+
+// Each request is handled on its own: a 404 does not end the connection.
+#[test]
+fn mixed_routes_on_same_connection() {
+    let _server = Server::start();
+    let mut connection = Connection::open();
+
+    assert_eq!(connection.send("GET / HTTP/1.1\r\n\r\n"), OK_EMPTY);
+    assert_eq!(
+        connection.send("GET /nope HTTP/1.1\r\n\r\n"),
+        NOT_FOUND_EMPTY
+    );
+    assert_eq!(
+        connection.send(&curl_get("/user-agent", "a/1")),
+        text_plain_200("a/1")
+    );
+    assert_eq!(
+        connection.send("GET /echo/last HTTP/1.1\r\n\r\n"),
+        text_plain_200("last")
+    );
+}
+
+// The client may wait before reusing the connection.
+#[test]
+fn idle_pause_between_requests() {
+    let _server = Server::start();
+    let mut connection = Connection::open();
+
+    assert_eq!(connection.send("GET / HTTP/1.1\r\n\r\n"), OK_EMPTY);
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        connection.send("GET /echo/later HTTP/1.1\r\n\r\n"),
+        text_plain_200("later")
+    );
+}
+
+// Both requests arrive in a single TCP write (RFC 9112 §9.3.2, pipelining):
+// the second one sits in the server's read buffer after the first is parsed.
+#[test]
+fn pipelined_requests_answered_in_order() {
+    let _server = Server::start();
+    let mut connection = Connection::open();
+
+    connection.write(&format!(
+        "{}{}",
+        curl_get("/echo/first", "curl/8.0"),
+        curl_get("/echo/second", "curl/8.0")
+    ));
+
+    assert_eq!(
+        connection.read_response().into_text(),
+        text_plain_200("first")
+    );
+    assert_eq!(
+        connection.read_response().into_text(),
+        text_plain_200("second")
+    );
+}
+
+// The body is consumed by Content-Length, so it does not leak into the next request.
+#[test]
+fn post_then_get_on_same_connection() {
+    let dir = TempDir::new("persistent-post");
+    let _server = Server::start_with_args(&["--directory", &dir.arg()]);
+    let mut connection = Connection::open();
+
+    assert_eq!(
+        connection.send(
+            "POST /files/kept HTTP/1.1\r\nContent-Type: application/octet-stream\r\nContent-Length: 5\r\n\r\n12345"
+        ),
+        CREATED_EMPTY
+    );
+    assert_eq!(
+        connection.send("GET /files/kept HTTP/1.1\r\n\r\n"),
+        octet_stream_200("12345")
+    );
+}
+
+// Request with a body, then another request, both in one TCP write.
+#[test]
+fn pipelined_post_then_get() {
+    let dir = TempDir::new("persistent-pipelined-post");
+    let _server = Server::start_with_args(&["--directory", &dir.arg()]);
+    let mut connection = Connection::open();
+
+    connection.write(
+        "POST /files/piped HTTP/1.1\r\nContent-Length: 3\r\n\r\nabcGET /echo/next HTTP/1.1\r\n\r\n",
+    );
+
+    assert_eq!(connection.read_response().into_text(), CREATED_EMPTY);
+    assert_eq!(
+        connection.read_response().into_text(),
+        text_plain_200("next")
+    );
+    assert_eq!(dir.read("piped"), "abc");
+}
+
+#[test]
+fn gzip_then_plain_on_same_connection() {
+    let _server = Server::start();
+    let mut connection = Connection::open();
+
+    connection.write("GET /echo/abc HTTP/1.1\r\nAccept-Encoding: gzip\r\n\r\n");
+    let compressed = connection.read_response();
+    assert_eq!(compressed.header("Content-Encoding"), Some("gzip"));
+    assert_eq!(gunzip(&compressed.body), "abc");
+
+    assert_eq!(
+        connection.send("GET /echo/abc HTTP/1.1\r\n\r\n"),
+        text_plain_200("abc")
+    );
+}
+
+// When the client is done (EOF), the server closes its side instead of
+// hanging or answering a phantom request.
+#[test]
+fn server_closes_when_client_closes() {
+    let _server = Server::start();
+    let mut connection = Connection::open();
+
+    assert_eq!(connection.send("GET / HTTP/1.1\r\n\r\n"), OK_EMPTY);
+    connection.shutdown_write();
+
+    assert_eq!(connection.read_until_closed(), b"");
+}
+
+// Same, but without any request: an empty connection gets no response at all.
+#[test]
+fn connection_closed_without_request_gets_no_response() {
+    let _server = Server::start();
+    let connection = Connection::open();
+    connection.shutdown_write();
+
+    assert_eq!(connection.read_until_closed(), b"");
+    assert_eq!(get("/"), OK_EMPTY);
+}
+
+// RFC 9112 §8: the client closes before the empty line ending the head,
+// so the request is incomplete and must not be routed.
+#[test]
+fn truncated_request_is_not_routed() {
+    let _server = Server::start();
+    let mut connection = Connection::open();
+    connection.write("GET /echo/abc HTTP/1.1\r\nHost: localhost:4221\r\n");
+    connection.shutdown_write();
+
+    assert_eq!(
+        String::from_utf8(connection.read_until_closed()).unwrap(),
+        BAD_REQUEST_EMPTY
+    );
+    assert_eq!(get("/"), OK_EMPTY);
+}
+
+// A complete request is answered even when a truncated one follows it.
+#[test]
+fn truncated_request_after_complete_one() {
+    let _server = Server::start();
+    let mut connection = Connection::open();
+    connection.write("GET /echo/first HTTP/1.1\r\n\r\nGET /echo/second HTTP/1.1\r\n");
+    connection.shutdown_write();
+
+    assert_eq!(
+        connection.read_response().into_text(),
+        text_plain_200("first")
+    );
+    assert_eq!(
+        String::from_utf8(connection.read_until_closed()).unwrap(),
+        BAD_REQUEST_EMPTY
+    );
 }

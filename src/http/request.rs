@@ -23,6 +23,8 @@ pub enum RequestError {
     InvalidBody,
     #[error("Invalid Content Length")]
     InvalidContentLength,
+    #[error("Truncated request")]
+    TruncatedRequest,
     #[error(transparent)]
     InvalidHeader(#[from] ParseHeadersError),
     #[error("I/O error")]

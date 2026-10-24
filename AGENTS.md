@@ -64,6 +64,6 @@ HTTP Compression
 
 Persistent Connections
 
-- [ ] Persistent connections
+- [x] Persistent connections
 - [ ] Concurrent persistent connections
 - [ ] Connection closure
