@@ -1,8 +1,7 @@
 use std::str::FromStr;
 
 use crate::http::{
-    encoding::Encoding,
-    headers::{Headers, ParseHeadersError},
+    headers::{Headers, ParseHeadersError, connection::Connection, encoding::Encoding},
     method::Method,
 };
 
@@ -64,11 +63,46 @@ impl Request {
         }
     }
 
-    pub fn accept_encoding(&self) -> Option<Encoding> {
-        self.header("Accept-Encoding")?
-            .split(',')
-            .map(str::trim)
-            .find_map(|coding| coding.parse().ok())
+    pub fn accept_encoding(&self) -> Option<Vec<Encoding>> {
+        match self.header("Accept-Encoding") {
+            Some(headers) => {
+                let list: Vec<Encoding> = headers
+                    .split(',')
+                    .map(str::trim)
+                    .filter_map(|coding| coding.parse().ok())
+                    .collect();
+                if !list.is_empty() { Some(list) } else { None }
+            }
+            None => None,
+        }
+    }
+
+    pub fn has_accept_encoding_gzip(&self) -> bool {
+        match &self.accept_encoding() {
+            Some(headers) => headers.contains(&Encoding::Gzip),
+            _ => false,
+        }
+    }
+
+    pub fn connection(&self) -> Option<Vec<Connection>> {
+        match self.header("Connection") {
+            Some(headers) => {
+                let list: Vec<Connection> = headers
+                    .split(',')
+                    .map(str::trim)
+                    .filter_map(|coding| coding.parse().ok())
+                    .collect();
+                if !list.is_empty() { Some(list) } else { None }
+            }
+            None => None,
+        }
+    }
+
+    pub fn has_connection_close(&self) -> bool {
+        match self.connection() {
+            Some(headers) => headers.contains(&Connection::Close),
+            _ => false,
+        }
     }
 
     pub fn path(&self) -> &str {
@@ -349,5 +383,135 @@ mod test {
             request.content_length(),
             Err(RequestError::InvalidContentLength)
         );
+    }
+
+    fn with_header(name: &str, value: &str) -> Request {
+        format!("GET / HTTP/1.1\r\n{name}: {value}\r\n\r\n")
+            .parse()
+            .unwrap()
+    }
+
+    // --- Accept-Encoding ---
+    // An empty list means "nothing usable": no Option needed on top of the Vec.
+
+    #[test]
+    fn accept_encoding_absent_is_empty() {
+        let request: Request = "GET / HTTP/1.1\r\n\r\n".parse().unwrap();
+        assert!(request.accept_encoding().is_none());
+        assert!(!request.has_accept_encoding_gzip());
+    }
+
+    #[test]
+    fn accept_encoding_gzip() {
+        let request = with_header("Accept-Encoding", "gzip");
+        assert!(matches!(
+            request.accept_encoding().unwrap().as_slice(),
+            [Encoding::Gzip]
+        ));
+        assert!(request.has_accept_encoding_gzip());
+    }
+
+    // RFC 9110 §5.1 and §8.4.1: field name and codings are case-insensitive.
+    #[test]
+    fn accept_encoding_is_case_insensitive() {
+        let request = with_header("accept-encoding", "GZip");
+        assert!(request.has_accept_encoding_gzip());
+    }
+
+    // RFC 9110 §12.5.3: Accept-Encoding is a comma-separated list.
+    #[test]
+    fn accept_encoding_finds_gzip_in_list() {
+        let request = with_header("Accept-Encoding", "encoding-1, gzip, encoding-2");
+        assert!(matches!(
+            request.accept_encoding().unwrap().as_slice(),
+            [Encoding::Gzip]
+        ));
+        assert!(request.has_accept_encoding_gzip());
+    }
+
+    #[test]
+    fn accept_encoding_list_tolerates_spaces() {
+        let request = with_header("Accept-Encoding", "br ,  gzip");
+        assert!(request.has_accept_encoding_gzip());
+    }
+
+    #[test]
+    fn accept_encoding_without_supported_coding_is_empty() {
+        let request = with_header("Accept-Encoding", "invalid-1, invalid-2");
+        assert!(request.accept_encoding().is_none());
+        assert!(!request.has_accept_encoding_gzip());
+    }
+
+    // --- Connection ---
+
+    #[test]
+    fn connection_absent_is_empty() {
+        let request: Request = "GET / HTTP/1.1\r\n\r\n".parse().unwrap();
+        assert!(request.connection().is_none());
+        assert!(!request.has_connection_close());
+    }
+
+    #[test]
+    fn connection_close() {
+        let request = with_header("Connection", "close");
+        assert!(matches!(
+            request.connection().unwrap().as_slice(),
+            [Connection::Close]
+        ));
+        assert!(request.has_connection_close());
+    }
+
+    // RFC 9110 §5.1 and §7.6.1: field name and options are case-insensitive.
+    #[test]
+    fn connection_is_case_insensitive() {
+        assert!(with_header("connection", "Close").has_connection_close());
+    }
+
+    #[test]
+    fn connection_keep_alive_does_not_close() {
+        let request = with_header("Connection", "keep-alive");
+        assert!(matches!(
+            request.connection().unwrap().as_slice(),
+            [Connection::KeepAlive]
+        ));
+        assert!(!request.has_connection_close());
+    }
+
+    // RFC 9110 §7.6.1: `Connection` is a list; `close` counts wherever it appears.
+    #[test]
+    fn connection_close_anywhere_in_list() {
+        assert!(with_header("Connection", "keep-alive, close").has_connection_close());
+        assert!(with_header("Connection", "close, keep-alive").has_connection_close());
+    }
+
+    // The list keeps the order the client sent.
+    #[test]
+    fn connection_keeps_order() {
+        let request = with_header("Connection", "keep-alive, close");
+        assert!(matches!(
+            request.connection().unwrap().as_slice(),
+            [Connection::KeepAlive, Connection::Close]
+        ));
+    }
+
+    #[test]
+    fn connection_list_tolerates_spaces() {
+        assert!(with_header("Connection", "upgrade ,  close").has_connection_close());
+    }
+
+    #[test]
+    fn connection_skips_unknown_options() {
+        let request = with_header("Connection", "Upgrade, keep-alive");
+        assert!(matches!(
+            request.connection().unwrap().as_slice(),
+            [Connection::KeepAlive]
+        ));
+    }
+
+    #[test]
+    fn connection_with_only_unknown_options_is_empty() {
+        let request = with_header("Connection", "upgrade");
+        assert!(request.connection().is_none());
+        assert!(!request.has_connection_close());
     }
 }

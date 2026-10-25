@@ -7,6 +7,7 @@ use std::{
 
 use crate::config::Config;
 use crate::handlers::route;
+use crate::http::headers::encoding::Encoding;
 use crate::http::response::Response;
 use std::io::Write;
 
@@ -56,12 +57,18 @@ pub fn handle_connection(stream: TcpStream, config: &Config) {
     let mut buffer = BufReader::new(stream);
 
     loop {
-        let mut should_drop = false;
-        let response: Response = match read_request(&mut buffer) {
+        let mut should_close = false;
+        let mut response: Response = match read_request(&mut buffer) {
             Ok(Some(request)) => {
                 let mut response = route(&request, config);
 
-                response.set_encoding(request.accept_encoding());
+                if request.has_accept_encoding_gzip() {
+                    response.set_encoding(Encoding::Gzip);
+                }
+
+                if request.has_connection_close() {
+                    should_close = true
+                }
 
                 response
             }
@@ -70,17 +77,20 @@ pub fn handle_connection(stream: TcpStream, config: &Config) {
             }
             Err(err) => {
                 eprintln!("error: {err}");
-                should_drop = true;
+                should_close = true;
                 err.into()
             }
         };
+        if should_close {
+            response.close();
+        }
         let stream = buffer.get_mut();
         let result = stream.write_all(&response.into_bytes());
         if let Err(e) = result {
             eprintln!("error: {}", e);
             break;
         }
-        if should_drop {
+        if should_close {
             break;
         }
     }

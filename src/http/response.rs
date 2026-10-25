@@ -3,8 +3,8 @@ use flate2::write::GzEncoder;
 use std::io::Write;
 
 use crate::http::HTTP_VERSION;
-use crate::http::encoding::Encoding;
 use crate::http::headers::Headers;
+use crate::http::headers::encoding::Encoding;
 use crate::http::request::RequestError;
 use crate::http::status::StatusCode;
 
@@ -38,9 +38,13 @@ impl Response {
         &self.status
     }
 
-    pub fn set_encoding(&mut self, encoding: Option<Encoding>) {
+    pub fn close(&mut self) {
+        self.headers.set("Connection", "close");
+    }
+
+    pub fn set_encoding(&mut self, encoding: Encoding) {
         match encoding {
-            Some(Encoding::Gzip) => {
+            Encoding::Gzip => {
                 let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
                 encoder.write_all(&self.body).unwrap();
 
@@ -56,7 +60,6 @@ impl Response {
                     .set("Content-Length", &self.body.len().to_string());
                 self.headers.set("Content-Encoding", Encoding::Gzip.into());
             }
-            None => (),
         }
     }
 
@@ -226,5 +229,77 @@ mod test {
         let body_start = bytes.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
 
         assert_eq!(bytes.len() - body_start, 4);
+    }
+
+    // --- Connection closure ---
+
+    #[test]
+    fn new_response_has_no_connection_header() {
+        assert_eq!(text_plain("abc").header("Connection"), None);
+    }
+
+    #[test]
+    fn close_sets_connection_header() {
+        let mut response = text_plain("abc");
+        response.close();
+
+        assert_eq!(response.header("Connection"), Some("close"));
+    }
+
+    #[test]
+    fn close_keeps_status_and_body() {
+        let mut response = text_plain("abc");
+        response.close();
+
+        assert_eq!(response.status(), &StatusCode::Ok);
+        assert_eq!(response.header("Content-Length"), Some("3"));
+        assert_eq!(response.body(), "abc");
+    }
+
+    #[test]
+    fn close_serializes_header() {
+        let mut response = empty(StatusCode::Ok);
+        response.close();
+
+        assert_eq!(
+            serialized(response),
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+    }
+
+    // Closing twice must not send the header twice.
+    #[test]
+    fn close_is_idempotent() {
+        let mut response = empty(StatusCode::Ok);
+        response.close();
+        response.close();
+
+        assert_eq!(serialized(response).matches("Connection:").count(), 1);
+    }
+
+    #[test]
+    fn close_survives_gzip_encoding() {
+        let mut response = text_plain("abc");
+        response.close();
+        response.set_encoding(Encoding::Gzip);
+
+        assert_eq!(response.header("Connection"), Some("close"));
+        assert_eq!(response.header("Content-Encoding"), Some("gzip"));
+    }
+
+    // A 400 from a handler (e.g. missing User-Agent) keeps the connection usable.
+    #[test]
+    fn bad_request_does_not_close_by_itself() {
+        assert_eq!(Response::bad_request().header("Connection"), None);
+    }
+
+    // The conversion only maps an error to a status: closing the connection
+    // (and announcing it) is decided by the server loop, in one place.
+    #[test]
+    fn request_error_converts_to_plain_bad_request() {
+        let response: Response = RequestError::TruncatedRequest.into();
+
+        assert_eq!(response.status(), &StatusCode::BadRequest);
+        assert_eq!(response.header("Connection"), None);
     }
 }

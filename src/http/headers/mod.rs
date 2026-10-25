@@ -1,3 +1,6 @@
+pub mod connection;
+pub mod encoding;
+
 use std::{fmt::Display, str::FromStr};
 
 #[derive(Default)]

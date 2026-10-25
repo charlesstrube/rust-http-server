@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub enum Encoding {
     Gzip,
 }

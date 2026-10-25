@@ -207,20 +207,14 @@ fn handles_sequential_connections() {
 #[test]
 fn malformed_request_responds_400() {
     let _server = Server::start();
-    assert_eq!(
-        send("garbage\r\n\r\n"),
-        "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n"
-    );
+    assert_eq!(send("garbage\r\n\r\n"), BAD_REQUEST_CLOSE);
     assert_eq!(get("/"), "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
 }
 
 #[test]
 fn unknown_method_responds_400() {
     let _server = Server::start();
-    assert_eq!(
-        send("BREW / HTTP/1.1\r\n\r\n"),
-        "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n"
-    );
+    assert_eq!(send("BREW / HTTP/1.1\r\n\r\n"), BAD_REQUEST_CLOSE);
     assert_eq!(get("/"), "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
 }
 
@@ -367,7 +361,7 @@ fn invalid_header_responds_400() {
     let _server = Server::start();
     assert_eq!(
         send("GET / HTTP/1.1\r\nHost : localhost\r\n\r\n"),
-        "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n"
+        BAD_REQUEST_CLOSE
     );
     assert_eq!(get("/"), "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
 }
@@ -561,6 +555,9 @@ fn files_and_other_routes_on_same_server() {
 
 const CREATED_EMPTY: &str = "HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n";
 const BAD_REQUEST_EMPTY: &str = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
+// RFC 9112 §9.6: a request the server cannot parse ends the connection.
+const BAD_REQUEST_CLOSE: &str =
+    "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 
 // Same request as `curl -v --data "<body>" -H "Content-Type: application/octet-stream"`.
 fn post(path: &str, body: &str) -> String {
@@ -705,7 +702,7 @@ fn post_invalid_content_length_responds_400() {
 
     assert_eq!(
         send("POST /files/bad HTTP/1.1\r\nContent-Length: abc\r\n\r\n"),
-        BAD_REQUEST_EMPTY
+        BAD_REQUEST_CLOSE
     );
     assert!(!dir.path.join("bad").exists());
     assert_eq!(get("/"), OK_EMPTY);
@@ -1089,7 +1086,7 @@ fn truncated_request_is_not_routed() {
 
     assert_eq!(
         String::from_utf8(connection.read_until_closed()).unwrap(),
-        BAD_REQUEST_EMPTY
+        BAD_REQUEST_CLOSE
     );
     assert_eq!(get("/"), OK_EMPTY);
 }
@@ -1108,6 +1105,248 @@ fn truncated_request_after_complete_one() {
     );
     assert_eq!(
         String::from_utf8(connection.read_until_closed()).unwrap(),
+        BAD_REQUEST_CLOSE
+    );
+}
+
+// --- Connection closure -----------------------------------------------------
+// RFC 9112 §9.6: after a request with `Connection: close`, the server sends one
+// last response carrying `Connection: close`, then closes the connection.
+
+// No client half-close here: `read_until_closed` only returns if the server
+// closes on its own (otherwise the read times out and the test fails).
+
+// Mirrors `curl --http1.1 http://localhost:4221/echo/orange --next http://localhost:4221/ -H "Connection: close"`.
+#[test]
+fn connection_close_matches_spec_example() {
+    let _server = Server::start();
+    let mut connection = Connection::open();
+
+    connection.write(&curl_get("/echo/orange", "curl/8.0"));
+    let first = connection.read_response();
+    assert_eq!(first.status_line(), "HTTP/1.1 200 OK");
+    assert_eq!(first.body, b"orange");
+    assert_eq!(first.header("Connection"), None);
+
+    connection.write(
+        "GET / HTTP/1.1\r\nHost: localhost:4221\r\nUser-Agent: curl/8.0\r\nAccept: */*\r\nConnection: close\r\n\r\n",
+    );
+    let second = connection.read_response();
+    assert_eq!(second.status_line(), "HTTP/1.1 200 OK");
+    assert_eq!(second.header("Connection"), Some("close"));
+
+    assert_eq!(connection.read_until_closed(), b"");
+}
+
+#[test]
+fn close_on_first_request() {
+    let _server = Server::start();
+    let mut connection = Connection::open();
+
+    connection.write("GET /echo/bye HTTP/1.1\r\nConnection: close\r\n\r\n");
+    let response = connection.read_response();
+    assert_eq!(response.body, b"bye");
+    assert_eq!(response.header("Connection"), Some("close"));
+
+    assert_eq!(connection.read_until_closed(), b"");
+}
+
+// Without `Connection: close`, responses must not announce a closure.
+#[test]
+fn keep_alive_response_has_no_connection_close() {
+    let _server = Server::start();
+    let mut connection = Connection::open();
+
+    connection.write("GET / HTTP/1.1\r\n\r\n");
+    assert_eq!(connection.read_response().header("Connection"), None);
+    assert_eq!(connection.send("GET / HTTP/1.1\r\n\r\n"), OK_EMPTY);
+}
+
+// RFC 9110 §5.1: field names are case-insensitive.
+#[test]
+fn connection_header_name_is_case_insensitive() {
+    let _server = Server::start();
+    let mut connection = Connection::open();
+
+    connection.write("GET / HTTP/1.1\r\nconnection: close\r\n\r\n");
+    assert_eq!(
+        connection.read_response().header("Connection"),
+        Some("close")
+    );
+    assert_eq!(connection.read_until_closed(), b"");
+}
+
+// RFC 9110 §7.6.1: connection options are case-insensitive tokens.
+#[test]
+fn close_token_is_case_insensitive() {
+    let _server = Server::start();
+    let mut connection = Connection::open();
+
+    connection.write("GET / HTTP/1.1\r\nConnection: Close\r\n\r\n");
+    assert_eq!(
+        connection.read_response().header("Connection"),
+        Some("close")
+    );
+    assert_eq!(connection.read_until_closed(), b"");
+}
+
+// RFC 9110 §7.6.1: `Connection` is a comma-separated list of options.
+#[test]
+fn close_token_found_in_list() {
+    let _server = Server::start();
+    let mut connection = Connection::open();
+
+    connection.write("GET / HTTP/1.1\r\nConnection: keep-alive, close\r\n\r\n");
+    assert_eq!(
+        connection.read_response().header("Connection"),
+        Some("close")
+    );
+    assert_eq!(connection.read_until_closed(), b"");
+}
+
+// Any other option keeps the connection open.
+#[test]
+fn keep_alive_option_keeps_connection_open() {
+    let _server = Server::start();
+    let mut connection = Connection::open();
+
+    connection.write("GET / HTTP/1.1\r\nConnection: keep-alive\r\n\r\n");
+    assert_ne!(
+        connection.read_response().header("Connection"),
+        Some("close")
+    );
+    assert_eq!(
+        connection.send("GET /echo/still HTTP/1.1\r\n\r\n"),
+        text_plain_200("still")
+    );
+}
+
+// RFC 9112 §9.6: the server must not process requests received after
+// the one carrying `close`, even if they already sit in its read buffer.
+#[test]
+fn pipelined_request_after_close_is_ignored() {
+    let _server = Server::start();
+    let mut connection = Connection::open();
+
+    connection.write(
+        "GET /echo/last HTTP/1.1\r\nConnection: close\r\n\r\nGET /echo/ignored HTTP/1.1\r\n\r\n",
+    );
+
+    let response = connection.read_response();
+    assert_eq!(response.body, b"last");
+    assert_eq!(response.header("Connection"), Some("close"));
+    assert_eq!(connection.read_until_closed(), b"");
+}
+
+// Closure does not depend on the route or the status code.
+#[test]
+fn close_on_not_found() {
+    let _server = Server::start();
+    let mut connection = Connection::open();
+
+    connection.write("GET /nope HTTP/1.1\r\nConnection: close\r\n\r\n");
+    let response = connection.read_response();
+    assert_eq!(response.status_line(), "HTTP/1.1 404 Not Found");
+    assert_eq!(response.header("Connection"), Some("close"));
+    assert_eq!(connection.read_until_closed(), b"");
+}
+
+#[test]
+fn close_with_gzip_keeps_compression() {
+    let _server = Server::start();
+    let mut connection = Connection::open();
+
+    connection
+        .write("GET /echo/zip HTTP/1.1\r\nAccept-Encoding: gzip\r\nConnection: close\r\n\r\n");
+    let response = connection.read_response();
+    assert_eq!(response.header("Content-Encoding"), Some("gzip"));
+    assert_eq!(response.header("Connection"), Some("close"));
+    assert_eq!(gunzip(&response.body), "zip");
+    assert_eq!(connection.read_until_closed(), b"");
+}
+
+#[test]
+fn close_after_post_with_body() {
+    let dir = TempDir::new("close-post");
+    let _server = Server::start_with_args(&["--directory", &dir.arg()]);
+    let mut connection = Connection::open();
+
+    connection
+        .write("POST /files/closed HTTP/1.1\r\nContent-Length: 3\r\nConnection: close\r\n\r\nabc");
+    let response = connection.read_response();
+    assert_eq!(response.status_line(), "HTTP/1.1 201 Created");
+    assert_eq!(response.header("Connection"), Some("close"));
+    assert_eq!(connection.read_until_closed(), b"");
+    assert_eq!(dir.read("closed"), "abc");
+}
+
+// Closing one connection must not stop the server from accepting others.
+#[test]
+fn server_still_accepts_after_close() {
+    let _server = Server::start();
+    let mut connection = Connection::open();
+
+    connection.write("GET / HTTP/1.1\r\nConnection: close\r\n\r\n");
+    connection.read_response();
+    assert_eq!(connection.read_until_closed(), b"");
+
+    assert_eq!(get("/"), OK_EMPTY);
+}
+
+// --- Connection closure on errors -------------------------------------------
+// RFC 9112 §9.6: a server that closes after a response SHOULD send `Connection: close`.
+
+// The request cannot be parsed: answer 400, announce the closure, then close.
+#[test]
+fn parse_error_announces_close_and_closes() {
+    let _server = Server::start();
+    let mut connection = Connection::open();
+
+    connection.write("garbage\r\n\r\n");
+    let response = connection.read_response();
+    assert_eq!(response.status_line(), "HTTP/1.1 400 Bad Request");
+    assert_eq!(response.header("Connection"), Some("close"));
+    assert_eq!(connection.read_until_closed(), b"");
+}
+
+// The connection was healthy before the bad request: only the error closes it.
+#[test]
+fn parse_error_after_valid_request_closes() {
+    let _server = Server::start();
+    let mut connection = Connection::open();
+
+    assert_eq!(connection.send("GET / HTTP/1.1\r\n\r\n"), OK_EMPTY);
+    connection.write("BREW / HTTP/1.1\r\n\r\n");
+    assert_eq!(connection.read_response().into_text(), BAD_REQUEST_CLOSE);
+    assert_eq!(connection.read_until_closed(), b"");
+}
+
+// The framing is lost (unknown body length): the next bytes cannot be trusted.
+#[test]
+fn invalid_content_length_announces_close_and_closes() {
+    let dir = TempDir::new("close-invalid-length");
+    let _server = Server::start_with_args(&["--directory", &dir.arg()]);
+    let mut connection = Connection::open();
+
+    connection
+        .write("POST /files/bad HTTP/1.1\r\nContent-Length: abc\r\n\r\nGET / HTTP/1.1\r\n\r\n");
+    assert_eq!(connection.read_response().into_text(), BAD_REQUEST_CLOSE);
+    assert_eq!(connection.read_until_closed(), b"");
+}
+
+// A 400 produced by a handler is a normal response on a parsed request:
+// the connection stays open and nothing announces a closure.
+#[test]
+fn handler_bad_request_keeps_connection_open() {
+    let _server = Server::start();
+    let mut connection = Connection::open();
+
+    assert_eq!(
+        connection.send("GET /user-agent HTTP/1.1\r\nHost: localhost:4221\r\n\r\n"),
         BAD_REQUEST_EMPTY
+    );
+    assert_eq!(
+        connection.send("GET /echo/still HTTP/1.1\r\n\r\n"),
+        text_plain_200("still")
     );
 }
