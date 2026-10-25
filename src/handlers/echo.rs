@@ -86,14 +86,13 @@ mod test {
         let response: Response = echo("abc").into();
 
         assert_eq!(response.status(), &StatusCode::Ok);
-        assert_eq!(response.body(), "abc");
+        assert_eq!(response.body_as_str(), "abc");
     }
 
     #[test]
-    fn response_has_content_type_and_length() {
+    fn response_has_content_type() {
         let response: Response = echo("hello").into();
 
         assert_eq!(response.header("Content-Type"), Some("text/plain"));
-        assert_eq!(response.header("Content-Length"), Some("5"));
     }
 }

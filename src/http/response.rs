@@ -2,7 +2,6 @@ use flate2::Compression;
 use flate2::write::GzEncoder;
 use std::io::Write;
 
-use crate::http::HTTP_VERSION;
 use crate::http::headers::Headers;
 use crate::http::headers::encoding::Encoding;
 use crate::http::request::RequestError;
@@ -15,9 +14,8 @@ pub struct Response {
 }
 
 impl Response {
-    pub fn new(status: StatusCode, mut headers: Headers, body: impl Into<Vec<u8>>) -> Self {
+    pub fn new(status: StatusCode, headers: Headers, body: impl Into<Vec<u8>>) -> Self {
         let body = body.into();
-        headers.set("Content-Length", &body.len().to_string());
         Self {
             status,
             headers,
@@ -38,8 +36,13 @@ impl Response {
         &self.status
     }
 
-    pub fn close(&mut self) {
-        self.headers.set("Connection", "close");
+    #[cfg(test)]
+    pub fn body(&self) -> &[u8] {
+        &self.body
+    }
+
+    pub fn into_parts(self) -> (StatusCode, Headers, Vec<u8>) {
+        (self.status, self.headers, self.body)
     }
 
     pub fn set_encoding(&mut self, encoding: Encoding) {
@@ -56,8 +59,7 @@ impl Response {
                         return;
                     }
                 }
-                self.headers
-                    .set("Content-Length", &self.body.len().to_string());
+
                 self.headers.set("Content-Encoding", Encoding::Gzip.into());
             }
         }
@@ -69,16 +71,8 @@ impl Response {
     }
 
     #[cfg(test)]
-    pub fn body(&self) -> &str {
+    pub fn body_as_str(&self) -> &str {
         std::str::from_utf8(&self.body).expect("body is not valid UTF-8")
-    }
-
-    pub fn into_bytes(self) -> Vec<u8> {
-        let head = format!("{} {}\r\n{}\r\n", HTTP_VERSION, self.status, self.headers);
-
-        let mut bytes = head.into_bytes();
-        bytes.extend_from_slice(&self.body);
-        bytes
     }
 }
 
@@ -96,35 +90,9 @@ mod test {
         Response::new(status, Headers::default(), vec![])
     }
 
-    // Compare as text so assertion failures show readable `\r\n` instead of byte arrays.
-    fn serialized(response: Response) -> String {
-        String::from_utf8(response.into_bytes()).unwrap()
-    }
-
     #[test]
     fn exposes_status() {
         assert_eq!(empty(StatusCode::NotFound).status(), &StatusCode::NotFound);
-    }
-
-    #[test]
-    fn serializes_200_status_line() {
-        assert_eq!(
-            serialized(empty(StatusCode::Ok)),
-            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
-        );
-    }
-
-    #[test]
-    fn serializes_404_status_line() {
-        assert_eq!(
-            serialized(empty(StatusCode::NotFound)),
-            "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"
-        );
-    }
-
-    #[test]
-    fn ends_with_empty_line() {
-        assert!(serialized(empty(StatusCode::Ok)).ends_with("\r\n\r\n"));
     }
 
     fn text_plain(body: &str) -> Response {
@@ -137,7 +105,7 @@ mod test {
 
     #[test]
     fn exposes_body() {
-        assert_eq!(text_plain("abc").body(), "abc");
+        assert_eq!(text_plain("abc").body_as_str(), "abc");
     }
 
     #[test]
@@ -148,149 +116,18 @@ mod test {
     // RFC 9110 §5.1: field names are case-insensitive.
     #[test]
     fn header_lookup_is_case_insensitive() {
-        assert_eq!(text_plain("abc").header("content-length"), Some("3"));
+        assert_eq!(text_plain("abc").header("content-type"), Some("text/plain"));
+    }
+
+    // Content-Length is framing: the HTTP/1.1 serializer adds it (RFC 9112 §6.2).
+    #[test]
+    fn new_does_not_set_content_length() {
+        assert_eq!(text_plain("abc").header("Content-Length"), None);
     }
 
     #[test]
     fn missing_header_is_none() {
         assert_eq!(text_plain("abc").header("X-Unknown"), None);
-    }
-
-    #[test]
-    fn serializes_headers_in_insertion_order() {
-        assert_eq!(
-            serialized(text_plain("")),
-            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 0\r\n\r\n"
-        );
-    }
-
-    // RFC 9112 §6.3: multiple Content-Length values make the message invalid.
-    #[test]
-    fn content_length_overrides_handler_value() {
-        let mut headers = Headers::default();
-        headers.add("Content-Length", "999");
-
-        let response = Response::new(StatusCode::Ok, headers, "abc".as_bytes());
-
-        assert_eq!(response.header("Content-Length"), Some("3"));
-        assert_eq!(
-            serialized(response),
-            "HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabc"
-        );
-    }
-
-    // RFC 9110 §8.6: Content-Length is a number of octets, not characters.
-    #[test]
-    fn content_length_counts_bytes_not_chars() {
-        assert_eq!(text_plain("é").header("Content-Length"), Some("2"));
-    }
-
-    #[test]
-    fn serializing_twice_gives_same_output() {
-        let first = text_plain("abc").into_bytes();
-        let second = text_plain("abc").into_bytes();
-
-        assert_eq!(String::from_utf8(first), String::from_utf8(second));
-    }
-
-    #[test]
-    fn serializes_body_after_empty_line() {
-        assert_eq!(
-            serialized(text_plain("abc")),
-            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 3\r\n\r\nabc"
-        );
-    }
-
-    // Not valid UTF-8: 0xff never appears in UTF-8, 0x1f 0x8b is the gzip magic number.
-    const BINARY: [u8; 4] = [0xff, 0x00, 0x1f, 0x8b];
-
-    fn binary() -> Response {
-        Response::new(StatusCode::Ok, Headers::default(), BINARY.to_vec())
-    }
-
-    #[test]
-    fn content_length_counts_binary_bytes() {
-        assert_eq!(binary().header("Content-Length"), Some("4"));
-    }
-
-    // Compared as bytes: the output is not valid UTF-8, so `serialized` would panic.
-    #[test]
-    fn serializes_binary_body_unchanged() {
-        let mut expected = b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\n".to_vec();
-        expected.extend_from_slice(&BINARY);
-
-        assert_eq!(binary().into_bytes(), expected);
-    }
-
-    // RFC 9112 §6.3: the announced length must match the bytes actually sent.
-    #[test]
-    fn sent_body_length_matches_content_length() {
-        let bytes = binary().into_bytes();
-        let body_start = bytes.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
-
-        assert_eq!(bytes.len() - body_start, 4);
-    }
-
-    // --- Connection closure ---
-
-    #[test]
-    fn new_response_has_no_connection_header() {
-        assert_eq!(text_plain("abc").header("Connection"), None);
-    }
-
-    #[test]
-    fn close_sets_connection_header() {
-        let mut response = text_plain("abc");
-        response.close();
-
-        assert_eq!(response.header("Connection"), Some("close"));
-    }
-
-    #[test]
-    fn close_keeps_status_and_body() {
-        let mut response = text_plain("abc");
-        response.close();
-
-        assert_eq!(response.status(), &StatusCode::Ok);
-        assert_eq!(response.header("Content-Length"), Some("3"));
-        assert_eq!(response.body(), "abc");
-    }
-
-    #[test]
-    fn close_serializes_header() {
-        let mut response = empty(StatusCode::Ok);
-        response.close();
-
-        assert_eq!(
-            serialized(response),
-            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-        );
-    }
-
-    // Closing twice must not send the header twice.
-    #[test]
-    fn close_is_idempotent() {
-        let mut response = empty(StatusCode::Ok);
-        response.close();
-        response.close();
-
-        assert_eq!(serialized(response).matches("Connection:").count(), 1);
-    }
-
-    #[test]
-    fn close_survives_gzip_encoding() {
-        let mut response = text_plain("abc");
-        response.close();
-        response.set_encoding(Encoding::Gzip);
-
-        assert_eq!(response.header("Connection"), Some("close"));
-        assert_eq!(response.header("Content-Encoding"), Some("gzip"));
-    }
-
-    // A 400 from a handler (e.g. missing User-Agent) keeps the connection usable.
-    #[test]
-    fn bad_request_does_not_close_by_itself() {
-        assert_eq!(Response::bad_request().header("Connection"), None);
     }
 
     // The conversion only maps an error to a status: closing the connection

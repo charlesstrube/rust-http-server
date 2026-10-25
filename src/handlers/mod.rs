@@ -25,7 +25,7 @@ where
     }
 }
 
-pub fn route(request: &Request, config: &Config) -> Response {
+fn route(request: &Request, config: &Config) -> Response {
     let path = request.path();
     let method = request.method();
 
@@ -53,14 +53,24 @@ pub fn route(request: &Request, config: &Config) -> Response {
     }
 }
 
+// Single entry point for every protocol: routing, then content negotiation (RFC 9110 §12.5.3).
+pub fn handle(request: &Request, config: &Config) -> Response {
+    let response = route(request, config);
+
+    response
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
     use crate::config::Config;
+    use crate::http1::serialize::serialize_response;
     use crate::test_support::TempDir;
+    // Test-only: raw HTTP/1.1 text is the most readable way to build a request.
+    use crate::http1::parse::parse_request;
 
     fn route_line_with(config: &Config, line: &str) -> Response {
-        let request: Request = match line.parse() {
+        let request = match parse_request(line) {
             Ok(request) => request,
             Err(e) => {
                 eprintln!("err: {}", e);
@@ -121,7 +131,7 @@ mod test {
 
     #[test]
     fn echo_returns_string_as_body() {
-        assert_eq!(route_line("GET /echo/abc HTTP/1.1").body(), "abc");
+        assert_eq!(route_line("GET /echo/abc HTTP/1.1").body_as_str(), "abc");
     }
 
     #[test]
@@ -133,17 +143,13 @@ mod test {
     }
 
     #[test]
-    fn echo_sets_content_length() {
-        assert_eq!(
-            route_line("GET /echo/hello-world HTTP/1.1").header("Content-Length"),
-            Some("11")
-        );
-    }
-
-    #[test]
     fn echo_matches_spec_bytes() {
         assert_eq!(
-            String::from_utf8(route_line("GET /echo/abc HTTP/1.1").into_bytes()).unwrap(),
+            String::from_utf8(serialize_response(
+                route_line("GET /echo/abc HTTP/1.1"),
+                false
+            ))
+            .unwrap(),
             "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 3\r\n\r\nabc"
         );
     }
@@ -161,7 +167,7 @@ mod test {
         let response = route_line("GET /echo/ HTTP/1.1");
 
         assert_eq!(response.status(), &StatusCode::NotFound);
-        assert_eq!(response.body(), "");
+        assert_eq!(response.body_as_str(), "");
         assert_eq!(response.header("Content-Type"), None);
     }
 
@@ -176,7 +182,7 @@ mod test {
     #[test]
     fn echo_ignores_request_headers() {
         assert_eq!(
-            route_line("GET /echo/abc HTTP/1.1\r\nUser-Agent: foobar/1.2.3\r\n\r\n").body(),
+            route_line("GET /echo/abc HTTP/1.1\r\nUser-Agent: foobar/1.2.3\r\n\r\n").body_as_str(),
             "abc"
         );
     }
@@ -190,13 +196,13 @@ mod test {
 
     #[test]
     fn user_agent_returns_header_value_as_body() {
-        assert_eq!(route_line(UA_REQUEST).body(), "foobar/1.2.3");
+        assert_eq!(route_line(UA_REQUEST).body_as_str(), "foobar/1.2.3");
     }
 
     #[test]
     fn user_agent_matches_spec_bytes() {
         assert_eq!(
-            String::from_utf8(route_line(UA_REQUEST).into_bytes()).unwrap(),
+            String::from_utf8(serialize_response(route_line(UA_REQUEST), false)).unwrap(),
             "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 12\r\n\r\nfoobar/1.2.3"
         );
     }
@@ -206,7 +212,7 @@ mod test {
         let response = route_line("GET /user-agent HTTP/1.1\r\nHost: localhost:4221\r\n\r\n");
 
         assert_eq!(response.status(), &StatusCode::BadRequest);
-        assert_eq!(response.body(), "");
+        assert_eq!(response.body_as_str(), "");
         assert_eq!(response.header("Content-Type"), None);
     }
 
@@ -235,9 +241,10 @@ mod test {
         let dir = dir_with_foo();
 
         assert_eq!(
-            String::from_utf8(
-                route_line_with(&config_for(&dir), "GET /files/foo HTTP/1.1").into_bytes()
-            )
+            String::from_utf8(serialize_response(
+                route_line_with(&config_for(&dir), "GET /files/foo HTTP/1.1"),
+                false
+            ))
             .unwrap(),
             "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 13\r\n\r\nHello, World!"
         );
@@ -287,7 +294,7 @@ mod test {
         let dir = dir_with_foo();
 
         assert_eq!(
-            route_line_with(&config_for(&dir), "GET /echo/abc HTTP/1.1").body(),
+            route_line_with(&config_for(&dir), "GET /echo/abc HTTP/1.1").body_as_str(),
             "abc"
         );
     }
@@ -308,7 +315,11 @@ mod test {
         let dir = TempDir::new();
 
         assert_eq!(
-            String::from_utf8(route_line_with(&config_for(&dir), SPEC_POST).into_bytes()).unwrap(),
+            String::from_utf8(serialize_response(
+                route_line_with(&config_for(&dir), SPEC_POST),
+                false
+            ))
+            .unwrap(),
             "HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n"
         );
     }
@@ -330,7 +341,7 @@ mod test {
         route_line_with(&config, &post_files("file_123", "mango banana"));
 
         assert_eq!(
-            route_line_with(&config, "GET /files/file_123 HTTP/1.1").body(),
+            route_line_with(&config, "GET /files/file_123 HTTP/1.1").body_as_str(),
             "mango banana"
         );
     }
@@ -377,6 +388,6 @@ mod test {
         let response = route_line_with(&config_for(&dir), &post_files("foo", "new"));
 
         assert_eq!(response.status(), &StatusCode::Created);
-        assert_eq!(response.body(), "");
+        assert_eq!(response.body_as_str(), "");
     }
 }

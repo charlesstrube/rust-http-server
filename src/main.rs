@@ -1,5 +1,6 @@
 mod handlers;
 mod http;
+mod http1;
 
 mod config;
 mod server;

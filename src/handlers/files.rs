@@ -169,6 +169,7 @@ impl From<CreatedFile> for Response {
 mod test {
     use super::*;
     use crate::http::{response::Response, status::StatusCode};
+    use crate::http1::serialize::serialize_response;
     use crate::test_support::TempDir;
 
     const SPEC_CONTENTS: &str = "Hello, World!";
@@ -188,7 +189,7 @@ mod test {
 
     fn assert_404(response: Response) {
         assert_eq!(response.status(), &StatusCode::NotFound);
-        assert_eq!(response.body(), "");
+        assert_eq!(response.body_as_str(), "");
         assert_eq!(response.header("Content-Type"), None);
     }
 
@@ -215,7 +216,7 @@ mod test {
         // "foo" → [Normal("foo")]
         let dir = dir_with_foo();
 
-        assert_eq!(response(dir.path(), "foo").body(), SPEC_CONTENTS);
+        assert_eq!(response(dir.path(), "foo").body_as_str(), SPEC_CONTENTS);
     }
 
     // RFC 2046 §4.5.1: application/octet-stream = arbitrary binary data.
@@ -231,23 +232,12 @@ mod test {
     }
 
     #[test]
-    fn sets_content_length_to_file_size() {
-        // "foo" → [Normal("foo")]
-        let dir = dir_with_foo();
-
-        assert_eq!(
-            response(dir.path(), "foo").header("Content-Length"),
-            Some("13")
-        );
-    }
-
-    #[test]
     fn matches_spec_bytes() {
         // "foo" → [Normal("foo")]
         let dir = dir_with_foo();
 
         assert_eq!(
-            String::from_utf8(response(dir.path(), "foo").into_bytes()).unwrap(),
+            String::from_utf8(serialize_response(response(dir.path(), "foo"), false)).unwrap(),
             "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 13\r\n\r\nHello, World!"
         );
     }
@@ -259,7 +249,7 @@ mod test {
         let contents = "line 1\r\nline 2\n\n  trailing spaces  \n";
         dir.write("raw.txt", contents);
 
-        assert_eq!(response(dir.path(), "raw.txt").body(), contents);
+        assert_eq!(response(dir.path(), "raw.txt").body_as_str(), contents);
     }
 
     #[test]
@@ -271,7 +261,7 @@ mod test {
         let response = response(dir.path(), "empty");
 
         assert_eq!(response.status(), &StatusCode::Ok);
-        assert_eq!(response.header("Content-Length"), Some("0"));
+        assert!(response.body().is_empty());
     }
 
     #[test]
@@ -281,7 +271,7 @@ mod test {
         let sub = dir.mkdir("sub");
         std::fs::write(sub.join("nested"), "deep").unwrap();
 
-        assert_eq!(response(dir.path(), "sub/nested").body(), "deep");
+        assert_eq!(response(dir.path(), "sub/nested").body_as_str(), "deep");
     }
 
     // --- Missing / invalid ---
@@ -367,7 +357,7 @@ mod test {
         let dir = TempDir::new();
         dir.write("v1..2.txt", "version");
 
-        assert_eq!(response(dir.path(), "v1..2.txt").body(), "version");
+        assert_eq!(response(dir.path(), "v1..2.txt").body_as_str(), "version");
     }
 
     #[test]
@@ -376,7 +366,10 @@ mod test {
         let dir = TempDir::new();
         dir.write("..hidden", "not a parent dir");
 
-        assert_eq!(response(dir.path(), "..hidden").body(), "not a parent dir");
+        assert_eq!(
+            response(dir.path(), "..hidden").body_as_str(),
+            "not a parent dir"
+        );
     }
 
     #[test]
@@ -445,7 +438,7 @@ mod test {
         let dir = dir_with_foo();
         std::os::unix::fs::symlink(dir.path().join("foo"), dir.path().join("alias")).unwrap();
 
-        assert_eq!(response(dir.path(), "alias").body(), "Hello, World!");
+        assert_eq!(response(dir.path(), "alias").body_as_str(), "Hello, World!");
     }
 
     // --- Create a file (POST {filename}) ---
@@ -482,7 +475,11 @@ mod test {
         let dir = TempDir::new();
 
         assert_eq!(
-            String::from_utf8(create_response(dir.path(), "number", "12345").into_bytes()).unwrap(),
+            String::from_utf8(serialize_response(
+                create_response(dir.path(), "number", "12345"),
+                false
+            ))
+            .unwrap(),
             "HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n"
         );
     }
@@ -523,7 +520,10 @@ mod test {
         let dir = TempDir::new();
         CreatedFile::create(dir.path(), "round-trip", "there and back").unwrap();
 
-        assert_eq!(response(dir.path(), "round-trip").body(), "there and back");
+        assert_eq!(
+            response(dir.path(), "round-trip").body_as_str(),
+            "there and back"
+        );
     }
 
     #[test]

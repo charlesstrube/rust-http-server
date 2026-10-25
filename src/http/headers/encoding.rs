@@ -1,5 +1,7 @@
 use std::str::FromStr;
 
+use crate::http::{request::Request, response::Response};
+
 #[derive(Clone, PartialEq)]
 pub enum Encoding {
     Gzip,
@@ -24,6 +26,19 @@ impl From<Encoding> for &str {
         match value {
             Encoding::Gzip => "gzip",
         }
+    }
+}
+
+// middleware
+pub fn with_gzip(handler: impl Fn(&Request) -> Response) -> impl Fn(&Request) -> Response {
+    move |request| {
+        let mut response = handler(request);
+
+        if request.has_accept_encoding_gzip() {
+            response.set_encoding(Encoding::Gzip);
+        }
+
+        response
     }
 }
 
