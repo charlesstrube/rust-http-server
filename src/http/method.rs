@@ -3,6 +3,7 @@ use std::fmt;
 pub enum Method {
     Get,
     Post,
+    Put,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -16,6 +17,7 @@ impl fmt::Display for Method {
         match self {
             Method::Get => write!(f, "GET"),
             Method::Post => write!(f, "POST"),
+            Method::Put => write!(f, "PUT"),
         }
     }
 }
@@ -26,6 +28,7 @@ impl TryFrom<String> for Method {
         match value.to_lowercase().as_str() {
             "get" => Ok(Self::Get),
             "post" => Ok(Method::Post),
+            "put" => Ok(Method::Put),
             value => Err(ParseMethodError::UnknownValue(value.into())),
         }
     }

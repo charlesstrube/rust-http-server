@@ -1350,3 +1350,85 @@ fn handler_bad_request_keeps_connection_open() {
         text_plain_200("still")
     );
 }
+
+// --- HTTP/2: protocol detection ---
+
+// RFC 9113 §3.4: an h2c client with prior knowledge starts with this preface.
+const H2_PREFACE: &str = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+
+// Step 1 only: the HTTP/2 side closes right after the preface.
+// Once SETTINGS are exchanged, this test must expect a SETTINGS frame instead.
+#[test]
+fn h2_preface_is_not_answered_as_http1() {
+    let _server = Server::start();
+    let mut connection = Connection::open();
+
+    connection.write(H2_PREFACE);
+
+    let received = connection.read_until_closed();
+    assert!(
+        !received.starts_with(b"HTTP/1.1"),
+        "got an HTTP/1.1 response: {:?}",
+        String::from_utf8_lossy(&received)
+    );
+}
+
+#[test]
+fn h2_preface_split_across_tcp_writes_is_detected() {
+    let _server = Server::start();
+    let mut connection = Connection::open();
+    let (first, second) = H2_PREFACE.split_at(5);
+
+    connection.write(first);
+    thread::sleep(Duration::from_millis(100));
+    connection.write(second);
+
+    let received = connection.read_until_closed();
+    assert!(!received.starts_with(b"HTTP/1.1"));
+}
+
+// The HTTP/2 connection must not take the server down with it.
+#[test]
+fn http1_still_works_after_an_h2_connection() {
+    let _server = Server::start();
+    let mut h2 = Connection::open();
+    h2.write(H2_PREFACE);
+    h2.read_until_closed();
+
+    assert_eq!(get("/echo/after"), text_plain_200("after"));
+}
+
+#[test]
+fn http1_and_h2_connections_coexist() {
+    let _server = Server::start();
+    let mut http1 = Connection::open();
+    let mut h2 = Connection::open();
+
+    h2.write(H2_PREFACE);
+    assert_eq!(
+        http1.send("GET /echo/both HTTP/1.1\r\n\r\n"),
+        text_plain_200("both")
+    );
+    h2.read_until_closed();
+}
+
+// Same first 4 bytes as the preface: detection must fall back to HTTP/1.1,
+// where PRI is an unknown method.
+#[test]
+fn pri_method_without_preface_responds_400() {
+    let _server = Server::start();
+
+    assert_eq!(send("PRI / HTTP/1.1\r\n\r\n"), BAD_REQUEST_CLOSE);
+}
+
+#[test]
+fn truncated_preface_closes_without_response() {
+    let _server = Server::start();
+    let mut connection = Connection::open();
+
+    connection.write(&H2_PREFACE[..12]);
+    connection.shutdown_write();
+
+    assert_eq!(connection.read_until_closed(), b"");
+    assert_eq!(get("/echo/alive"), text_plain_200("alive"));
+}

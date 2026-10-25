@@ -46,6 +46,7 @@ fn route(request: &Request, config: &Config) -> Response {
             Some(directory) => match method {
                 Method::Get => respond(StaticFile::open(directory, rest)),
                 Method::Post => respond(CreatedFile::create(directory, rest, request.body())),
+                _ => Response::not_found(),
             },
             None => Response::not_found(),
         },
