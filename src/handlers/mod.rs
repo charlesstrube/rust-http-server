@@ -56,9 +56,7 @@ fn route(request: &Request, config: &Config) -> Response {
 
 // Single entry point for every protocol: routing, then content negotiation (RFC 9110 §12.5.3).
 pub fn handle(request: &Request, config: &Config) -> Response {
-    let response = route(request, config);
-
-    response
+    route(request, config)
 }
 
 #[cfg(test)]

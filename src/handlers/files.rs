@@ -343,7 +343,7 @@ mod test {
         let public = dir.mkdir("public");
         let absolute = dir.path().join("secret");
 
-        eprintln!("{}", &public.display());
+        eprintln!("{}", public.display());
 
         assert_404(response(&public, &format!("{}", absolute.display())));
     }

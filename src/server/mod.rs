@@ -5,13 +5,12 @@ use std::net::TcpStream;
 use crate::config::Config;
 use crate::handlers::handle;
 use crate::http::headers::encoding::with_gzip;
-use crate::http1::serve;
+
 use crate::http2::PREFACE;
 use crate::server::protocol::Protocol;
 
 fn detect(reader: &mut impl BufRead) -> io::Result<Option<(Protocol, Vec<u8>)>> {
     let mut index = 0;
-    let mut http_protocol: Option<Protocol> = None;
     let mut buffer = vec![];
 
     loop {
@@ -21,38 +20,19 @@ fn detect(reader: &mut impl BufRead) -> io::Result<Option<(Protocol, Vec<u8>)>> 
                 if !buffer.is_empty() {
                     return Err(io::ErrorKind::UnexpectedEof.into());
                 }
-                break;
+                return Ok(None);
             }
             _ => {
-                println!("byte: {}, index: {}", byte[0], index);
                 buffer.push(byte[0]);
-                if PREFACE[index] == byte[0] && http_protocol.is_none() {
-                    println!("protocol: http2");
-                    http_protocol = Some(Protocol::Http2);
-                } else if PREFACE[index] != byte[0] {
-                    println!("protocol: http1");
-                    http_protocol = Some(Protocol::Http1);
-                    break;
+                if PREFACE[index] != byte[0] {
+                    return Ok(Some((Protocol::Http1, buffer)));
                 }
-                if index == 23 {
-                    println!("break 24");
-                    break;
+                if index == PREFACE.len() - 1 {
+                    return Ok(Some((Protocol::Http2, buffer)));
                 }
 
                 index += 1;
             }
-        }
-    }
-
-    match http_protocol {
-        Some(protocol) => {
-            println!("protocol final: {}", protocol);
-
-            Ok(Some((protocol, buffer)))
-        }
-        _ => {
-            println!("final none");
-            Ok(None)
         }
     }
 }
@@ -60,23 +40,21 @@ fn detect(reader: &mut impl BufRead) -> io::Result<Option<(Protocol, Vec<u8>)>> 
 pub fn handle_connection(stream: TcpStream, config: &Config) {
     let mut buffer = BufReader::new(&stream);
     match detect(&mut buffer) {
-        Ok(Some((Protocol::Http1, consumed))) => {
-            let reader = Cursor::new(consumed).chain(&mut buffer);
+        Ok(Some((protocol, consumed))) => match protocol {
+            Protocol::Http1 => {
+                let reader = Cursor::new(consumed).chain(&mut buffer);
 
-            let handler = with_gzip(move |request| handle(request, config));
-            serve(reader, &stream, handler);
-        }
-        Ok(Some((Protocol::Http2, _))) => {
-            println!("cool, http2");
-            unimplemented!()
-        }
-        Ok(None) => {
-            println!("cool, EOF");
-            unimplemented!()
-        }
-        Err(_) => {
-            println!("cool, error");
-            unimplemented!()
+                let handler = with_gzip(move |request| handle(request, config));
+                crate::http1::serve(reader, &stream, handler);
+            }
+            Protocol::Http2 => {
+                let handler = with_gzip(move |request| handle(request, config));
+                crate::http2::serve(buffer, &stream, handler);
+            }
+        },
+        Ok(None) => (),
+        Err(error) => {
+            println!("error: {}", error);
         }
     };
 }
