@@ -1,8 +1,5 @@
 use std::{
-    io::{
-        ErrorKind::{self, Interrupted},
-        Read,
-    },
+    io::{Error, ErrorKind, Read},
     ops::BitOr,
 };
 
@@ -104,6 +101,17 @@ struct FrameHeader {
     stream_id: u32,
 }
 
+impl From<Error> for FrameError {
+    fn from(err: Error) -> Self {
+        match err.kind() {
+            // if it's truncated before the end of buffer
+            ErrorKind::UnexpectedEof => FrameError::Truncated,
+            // maps the rest of errors to Io
+            _ => FrameError::Io(err.to_string()),
+        }
+    }
+}
+
 impl FrameHeader {
     pub fn parse(df: &[u8; 9]) -> Self {
         let l_0 = u32::from(df[0]) << 16;
@@ -191,60 +199,14 @@ impl Frame {
     }
 }
 
-fn read_buffer(read: &mut impl Read, buffer: &mut [u8], max: usize) -> Result<u8, FrameError> {
-    let mut filled = 0;
-
-    while filled < 9 {
-        let n = read.read(&mut buffer[filled..]) /* + gestion d'erreur */;
-        match n {
-            Ok(0) if filled == 0 => return Ok(1),
-            Ok(0) => return Err(FrameError::Truncated),
-            Ok(value) => filled += value,
-            Err(err) if err.kind() == ErrorKind::Interrupted => continue,
-            Err(err) => return Err(FrameError::Io(err.to_string())),
-        }
-    }
-
-    Ok(0)
-}
-
-pub fn read_frame(read: &mut impl Read, max: u32) -> Result<Option<Frame>, FrameError> {
-    let mut buffer = [0u8; 9];
-    let mut filled = 0;
-
-    while filled < 9 {
-        let n = read.read(&mut buffer[filled..]) /* + gestion d'erreur */;
-        match n {
-            Ok(0) if filled == 0 => return Ok(None),
-            Ok(0) => return Err(FrameError::Truncated),
-            Ok(value) => filled += value,
-            Err(err) if err.kind() == ErrorKind::Interrupted => continue,
-            Err(err) => return Err(FrameError::Io(err.to_string())),
-        }
-    }
-
-    let frame_header = FrameHeader::parse(&buffer);
-
-    if frame_header.length > max {
-        return Err(FrameError::TooLarge {
-            length: frame_header.length,
-            max,
-        });
-    }
-
+fn read_frame_payload(
+    read: &mut impl Read,
+    frame_header: FrameHeader,
+) -> Result<Frame, FrameError> {
     let mut payload: Vec<u8> = vec![0u8; frame_header.length as usize];
-    filled = 0;
 
-    while filled < frame_header.length as usize {
-        let n = read.read(&mut payload[filled..]) /* + gestion d'erreur */;
-        match n {
-            Ok(0) if filled == 0 => return Ok(None),
-            Ok(0) => return Err(FrameError::Truncated),
-            Ok(value) => filled += value,
-            Err(err) if err.kind() == ErrorKind::Interrupted => continue,
-            Err(err) => return Err(FrameError::Io(err.to_string())),
-        }
-    }
+    // read and remap errors to FrameError with from<Error>
+    read.read_exact(&mut payload)?;
 
     let frame = Frame::new(
         frame_header.frame_type,
@@ -253,7 +215,45 @@ pub fn read_frame(read: &mut impl Read, max: u32) -> Result<Option<Frame>, Frame
         payload,
     );
 
-    Ok(Some(frame))
+    Ok(frame)
+}
+
+fn read_header(read: &mut impl Read) -> Result<Option<FrameHeader>, FrameError> {
+    let mut buffer = [0u8; 9];
+    let mut filled = 0;
+
+    while filled < buffer.len() {
+        // match on the bytes read
+        match read.read(&mut buffer[filled..]) {
+            // if source (read) has 0 bytes and buffer has 0 bytes filled, it's clean
+            Ok(0) if filled == 0 => return Ok(None),
+            // source doesn't have any butes left but we didn't reach the end of the buffer
+            Ok(0) => return Err(FrameError::Truncated),
+            // add
+            Ok(value) => filled += value,
+            // restart the loop
+            Err(err) if err.kind() == ErrorKind::Interrupted => continue,
+            // err
+            Err(err) => return Err(err.into()),
+        }
+    }
+
+    Ok(Some(FrameHeader::parse(&buffer)))
+}
+
+pub fn read_frame(read: &mut impl Read, max: u32) -> Result<Option<Frame>, FrameError> {
+    let Some(frame_header) = read_header(read)? else {
+        return Ok(None);
+    };
+
+    if frame_header.length > max {
+        return Err(FrameError::TooLarge {
+            length: frame_header.length,
+            max,
+        });
+    }
+
+    Ok(Some(read_frame_payload(read, frame_header)?))
 }
 
 #[cfg(test)]
@@ -536,6 +536,17 @@ mod test {
         let mut reader = Cursor::new(vec![
             0x00, 0x00, 0x08, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, // announces 8 bytes
             1, 2, 3,
+        ]);
+
+        assert_eq!(read_frame(&mut reader, MAX), Err(FrameError::Truncated));
+    }
+
+    // Once the header is read, the frame has started: EOF is never a clean close here.
+    #[test]
+    fn eof_right_after_the_header_is_truncated() {
+        let mut reader = Cursor::new(vec![
+            0x00, 0x00, 0x08, 0x06, 0x00, 0x00, 0x00, 0x00,
+            0x00, // announces 8 bytes, none follow
         ]);
 
         assert_eq!(read_frame(&mut reader, MAX), Err(FrameError::Truncated));
