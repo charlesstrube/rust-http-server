@@ -114,7 +114,11 @@ impl Connection {
     }
 
     fn write(&mut self, raw: &str) {
-        self.reader.get_mut().write_all(raw.as_bytes()).unwrap();
+        self.write_bytes(raw.as_bytes());
+    }
+
+    fn write_bytes(&mut self, raw: &[u8]) {
+        self.reader.get_mut().write_all(raw).unwrap();
     }
 
     fn read_response(&mut self) -> RawResponse {
@@ -1356,23 +1360,25 @@ fn handler_bad_request_keeps_connection_open() {
 // RFC 9113 §3.4: an h2c client with prior knowledge starts with this preface.
 const H2_PREFACE: &str = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 
-// Step 1 only: the HTTP/2 side closes right after the preface.
-// Once SETTINGS are exchanged, this test must expect a SETTINGS frame instead.
+// Empty SETTINGS frame on stream 0: our server preface, and the minimal client one.
+const H2_EMPTY_SETTINGS: [u8; 9] = [0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00];
+const H2_SETTINGS_ACK: [u8; 9] = [0x00, 0x00, 0x00, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00];
+
+// RFC 9113 §3.4: the server answers with its own SETTINGS, then acknowledges the client's.
 #[test]
-fn h2_preface_is_not_answered_as_http1() {
+fn h2_preface_is_answered_with_settings() {
     let _server = Server::start();
     let mut connection = Connection::open();
 
     connection.write(H2_PREFACE);
+    connection.write_bytes(&H2_EMPTY_SETTINGS);
+    connection.shutdown_write();
 
     let received = connection.read_until_closed();
-    assert!(
-        !received.starts_with(b"HTTP/1.1"),
-        "got an HTTP/1.1 response: {:?}",
-        String::from_utf8_lossy(&received)
-    );
+    assert_eq!(received, [H2_EMPTY_SETTINGS, H2_SETTINGS_ACK].concat());
 }
 
+// The client goes away before its SETTINGS: only our preface is sent.
 #[test]
 fn h2_preface_split_across_tcp_writes_is_detected() {
     let _server = Server::start();
@@ -1382,9 +1388,10 @@ fn h2_preface_split_across_tcp_writes_is_detected() {
     connection.write(first);
     thread::sleep(Duration::from_millis(100));
     connection.write(second);
+    connection.shutdown_write();
 
     let received = connection.read_until_closed();
-    assert!(!received.starts_with(b"HTTP/1.1"));
+    assert_eq!(received, H2_EMPTY_SETTINGS);
 }
 
 // The HTTP/2 connection must not take the server down with it.
@@ -1393,11 +1400,13 @@ fn http1_still_works_after_an_h2_connection() {
     let _server = Server::start();
     let mut h2 = Connection::open();
     h2.write(H2_PREFACE);
+    h2.shutdown_write();
     h2.read_until_closed();
 
     assert_eq!(get("/echo/after"), text_plain_200("after"));
 }
 
+// The HTTP/2 connection waits for the client's SETTINGS: it must not block HTTP/1.1 meanwhile.
 #[test]
 fn http1_and_h2_connections_coexist() {
     let _server = Server::start();
@@ -1409,6 +1418,7 @@ fn http1_and_h2_connections_coexist() {
         http1.send("GET /echo/both HTTP/1.1\r\n\r\n"),
         text_plain_200("both")
     );
+    h2.shutdown_write();
     h2.read_until_closed();
 }
 
