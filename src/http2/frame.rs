@@ -3,7 +3,7 @@ use std::{
     ops::BitOr,
 };
 
-const DEFAULT_MAX_FRAME_SIZE: u32 = 16_384;
+pub(crate) const DEFAULT_MAX_FRAME_SIZE: u32 = 16_384;
 const MAX_FRAME_LENGTH: usize = 0xFF_FFFF;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -177,6 +177,18 @@ impl Frame {
             stream_id,
             payload: payload.into(),
         }
+    }
+
+    pub fn frame_type(&self) -> FrameType {
+        self.frame_type
+    }
+
+    pub fn flags(&self) -> Flags {
+        self.flags
+    }
+
+    pub fn stream_id(&self) -> &u32 {
+        &self.stream_id
     }
 
     pub fn payload(&self) -> &[u8] {
