@@ -1,5 +1,6 @@
 pub mod connection;
 pub mod frame;
+pub mod hpack;
 pub mod settings;
 
 use std::io::{BufRead, Write};

@@ -68,3 +68,7 @@ nghttp -nv http://localhost:4221/echo/abc
 ```
 
 `nghttp -nv` prints every frame sent and received.
+
+## HTTP/2 roadmap
+
+The step-by-step plan lives in [roadmap/](roadmap/README.md).
