@@ -1,5 +1,10 @@
 use crate::http2::hpack::HpackError;
 
+const MAX_CONTINUATION_BYTES: usize = 5;
+const CHUNK_BITS: usize = 7;
+const CHUNK_MASK: u8 = 0x7F; // 0111_1111 : the 7 value bits
+const CONTINUATION_FLAG: u8 = 0x80;
+
 /*
  * Format	                 result
  * {:08b}	                01000001
@@ -11,10 +16,25 @@ use crate::http2::hpack::HpackError;
 
 // RFC 7541 §5.1: decodes an integer whose first byte uses its `prefix_bits`
 // low bits (1..=8). Returns the value and the number of bytes consumed.
+//
+// The bits above the prefix are flags owned by the caller: they are ignored.
+// If the prefix is not all ones, it holds the whole value:
+//
+//     0 1 0 │ 0 1 0 1 0                prefix_bits = 5  →  (10, 1)
+//     flags │ value = 10
+//
+// If the prefix is all ones (2^N - 1), the value goes on in the next bytes:
+// 7 value bits each, least significant group first, bit 7 = "another byte follows".
+//
+//     byte 0   0 0 0 │ 1 1 1 1 1       prefix full             =   31
+//     byte 1   1 │ 0 0 1 1 0 1 0       go on,  26 << (0 * 7)  =   26
+//     byte 2   0 │ 0 0 0 1 0 1 0       last,   10 << (1 * 7)  = 1280
+//                                                              ──────
+//                                                   (1337, 3) ←  1337
+//
+// At most MAX_CONTINUATION_BYTES follow: this bounds the shift and rejects
+// a peer sending endless continuation bytes.
 pub fn decode_integer(input: &[u8], prefix_bits: u8) -> Result<(usize, usize), HpackError> {
-    let mut count = 1;
-
-    let mut moving = 0;
     let first = input.first().ok_or(HpackError::Truncated)?;
 
     let mask = u8::MAX >> (8 - prefix_bits);
@@ -23,22 +43,24 @@ pub fn decode_integer(input: &[u8], prefix_bits: u8) -> Result<(usize, usize), H
     let mut result = value as usize;
 
     if value < mask {
-        return Ok((value as usize, count));
+        return Ok((result, 1));
     }
 
     for (index, byte) in input[1..].iter().enumerate() {
-        count += 1;
-        let bit7 = byte >> 7;
-        let chunk = byte & 0x7F;
+        if index >= MAX_CONTINUATION_BYTES {
+            return Err(HpackError::Overflow);
+        }
+        let count = index + 2; // we are on the second chunk
+        let chunk = byte & CHUNK_MASK;
+        let moving = index * CHUNK_BITS;
 
-        result += (chunk as usize) << moving;
+        result = result
+            .checked_add((chunk as usize) << moving)
+            .ok_or(HpackError::Overflow)?;
 
-        if bit7 == 0 {
+        if byte & CONTINUATION_FLAG == 0 {
             return Ok((result, count));
         }
-
-        moving += 7;
-        println!("{} - byte: {:08b}", index, byte);
     }
     Err(HpackError::Truncated)
 }
@@ -157,6 +179,22 @@ mod test {
         let mut input = vec![0b0001_1111];
         input.extend_from_slice(&[0xFF; 10]);
         input.push(0b0000_0001);
+
+        assert_eq!(decode_integer(&input, 5), Err(HpackError::Overflow));
+    }
+
+    // The limit itself is accepted: 5 continuation bytes, the last chunk shifted by 28.
+    #[test]
+    fn accepts_the_maximum_number_of_continuation_bytes() {
+        let input = [0b0001_1111, 0x80, 0x80, 0x80, 0x80, 0b0000_0001];
+
+        assert_eq!(decode_integer(&input, 5), Ok((31 + (1 << 28), 6)));
+    }
+
+    // One byte past the limit overflows, even though the value would fit in a usize.
+    #[test]
+    fn rejects_one_continuation_byte_past_the_limit() {
+        let input = [0b0001_1111, 0x80, 0x80, 0x80, 0x80, 0x80, 0b0000_0001];
 
         assert_eq!(decode_integer(&input, 5), Err(HpackError::Overflow));
     }
