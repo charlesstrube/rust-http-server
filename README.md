@@ -1,77 +1,68 @@
-[![progress-banner](https://backend.codecrafters.io/progress/http-server/5b7c201f-4b0a-4ef9-8db6-a874aea410de)](https://app.codecrafters.io/users/charlesstrube?r=2qF)
+# Rust HTTP/1.1 and HTTP/2 protocal trainging
 
-This is a starting point for Rust solutions to the
-["Build Your Own HTTP server" Challenge](https://app.codecrafters.io/courses/http-server/overview).
+HTTP/1.1 works
+I'm doing HTTP/2
+I won't do HTTP/3 but might pick this up later
 
-[HTTP](https://en.wikipedia.org/wiki/Hypertext_Transfer_Protocol) is the
-protocol that powers the web. In this challenge, you'll build a HTTP/1.1 server
-that is capable of serving multiple clients.
+## What travels over HTTP/2, the big picture
 
-Along the way you'll learn about TCP servers,
-[HTTP request syntax](https://www.w3.org/Protocols/rfc2616/rfc2616-sec5.html),
-and more.
+### The picture: a pipe and envelopes
 
-**Note**: If you're viewing this repo on GitHub, head over to
-[codecrafters.io](https://codecrafters.io) to try the challenge.
+In **HTTP/1.1**, the TCP pipe carries a continuous stream of text: one request, its response, the next one, each in turn.
 
-# Passing the first stage
+In **HTTP/2**, the same TCP pipe carries a sequence of **small envelopes**, the *frames*. Each envelope carries:
 
-The entry point for your HTTP server implementation is in `src/main.rs`. Study
-and uncomment the relevant code, and then run the command below to execute the
-tests on our servers:
+- **its size**;
+- **its type**: what it contains;
+- **a conversation number**: the *stream*.
+
+What is inside the envelope depends on its type.
+
+### Two families of envelopes
+
+**1. Connection housekeeping**: number 0, "this is about the pipe itself".
+
+| Envelope | Roughly |
+|---|---|
+| SETTINGS | "Here are my rules: max envelope size, how many conversations in parallel…" |
+| SETTINGS ACK | "Got your rules." |
+| PING / PING ACK | "Are you still there?" / "Yes." |
+| WINDOW_UPDATE | "You can send me X more bytes." |
+| GOAWAY | "I'm hanging up." |
+
+**2. Requests and responses**: numbers 1, 3, 5… One number = one request and its response.
+
+| Envelope | Roughly | HTTP/1.1 equivalent |
+|---|---|---|
+| HEADERS | The "who / what / where": method, path, headers, status | Request line or status line, plus the headers |
+| DATA | The content | The body |
+
+The **END_STREAM** flag on the last envelope of a number means: "I'm done talking on this conversation".
+
+### An exchange with nghttp, simplified
+
+```
+Client → "Hello, I speak HTTP/2"                         (preface)
+Client → "My rules: …"                                   (SETTINGS, #0)
+Client → "Conversation #1: GET /echo/abc, that's all"    (HEADERS, #1, END_STREAM)
+Server → "My rules: the defaults"                        (SETTINGS, #0)
+Server → "Got your rules"                                (SETTINGS ACK, #0)
+Client → "Got yours"                                     (SETTINGS ACK, #0)
+           … the client waits for the response to #1 …
+Server → "Conversation #1: 200 OK"                       (HEADERS, #1)
+Server → "Conversation #1: abc, that's all"              (DATA, #1, END_STREAM)
+```
+
+### The two key ideas
+
+1. **The conversation number is what enables parallelism.** Envelopes for #1 and #3 can arrive interleaved in the pipe; each side sorts them back by number. In HTTP/1.1, nothing said which request a piece of text belonged to, hence "one at a time".
+2. **The content of a HEADERS frame is compressed (HPACK).** Instead of spelling out `user-agent: nghttp2/1.70.0`, the sender often just says "entry #62 of the dictionary we share".
+
+### To observe it
 
 ```sh
-codecrafters submit
+./your_program.sh
+nghttp -nv http://localhost:4221/echo/abc
 ```
 
-Time to move on to the next stage!
-
-# Stage 2 & beyond
-
-Note: This section is for stages 2 and beyond.
-
-1. Ensure you have `cargo (1.96)` installed locally
-1. Run `./your_program.sh` to run your program, which is implemented in
-   `src/main.rs`. This command compiles your Rust project, so it might be slow
-   the first time you run it. Subsequent runs will be fast.
-1. Run `codecrafters submit` to submit your solution to CodeCrafters. Test
-   output will be streamed to your terminal.
-
-
-# Architecture
-
-```
-src/
-  ├── main.rs              // entry point: reads the config, binds 127.0.0.1:4221, one thread per connection
-  ├── config.rs            // struct Config { directory: Option<PathBuf> }, parsed from the CLI args
-  ├── test_support.rs      // (tests only) TempDir: temporary directory removed on Drop
-  ├── server/              // the only module that knows about both protocols
-  │   ├── mod.rs           // handle_connection: detect() reads the first bytes, dispatches to http1 or http2
-  │   └── protocol.rs      // enum Protocol { Http1, Http2 }
-  ├── http/                // shared HTTP semantics (RFC 9110), independent of the wire format
-  │   ├── method.rs        // enum Method { Get, Post, Put } + parsing
-  │   ├── status.rs        // enum StatusCode -> code + reason phrase
-  │   ├── request.rs       // struct Request { method, path, headers, body } + RequestError
-  │   ├── response.rs      // struct Response { status, headers, body }
-  │   └── headers/
-  │       ├── mod.rs       // struct Headers(Vec<(String, String)>): keeps order and duplicates, case-insensitive get/set
-  │       └── encoding.rs  // enum Encoding { Gzip } + with_gzip(handler): body compression
-  ├── http1/               // HTTP/1.1 text codec (RFC 9112)
-  │   ├── mod.rs           // read_request (head + body via Content-Length) and serve: keep-alive loop
-  │   ├── parse.rs         // parse_request, parse_headers, content_length
-  │   ├── serialize.rs     // serialize_response: status line, headers, Content-Length, Connection: close
-  │   └── connection.rs    // Connection header (close / keep-alive) + wants_close
-  ├── http2/               // HTTP/2 binary codec (RFC 9113), work in progress
-  │   └── mod.rs           // PREFACE (24 bytes) + serve (stub)
-  └── handlers/            // business logic, depends on http/ only
-      ├── mod.rs           // handle(&Request, &Config) -> Response: routes on method + path
-      ├── echo.rs          // GET /echo/{str}
-      ├── user_agent.rs    // GET /user-agent
-      └── files.rs         // GET and POST /files/{name}
-
-tests/
-  └── http_server.rs       // integration tests against the real server over TCP (HTTP/1.1 + h2 detection)
-```
-
-Dependency direction: `server` wires `http1` / `http2` and `handlers` together, and they all depend on `http`.
-Never the other way around: handlers don't know which protocol carried the request.
+`nghttp -nv` prints every frame sent and received.
