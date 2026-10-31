@@ -1,7 +1,9 @@
 # Rust HTTP/1.1 and HTTP/2 protocal trainging
 
 HTTP/1.1 works
+
 I'm doing HTTP/2
+
 I won't do HTTP/3 but might pick this up later
 
 ## What travels over HTTP/2, the big picture
