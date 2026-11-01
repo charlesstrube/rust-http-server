@@ -1,6 +1,6 @@
 use crate::http2::hpack::HpackError;
 
-static STATIC_TABLE: &'static [(&str, &str)] = &[
+static STATIC_TABLE: &[(&str, &str)] = &[
     (":authority", ""),                   // 1
     (":method", "GET"),                   // 2
     (":method", "POST"),                  // 3

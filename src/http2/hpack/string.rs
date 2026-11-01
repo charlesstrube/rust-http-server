@@ -25,21 +25,16 @@ pub fn decode_string(input: &[u8]) -> Result<(Vec<u8>, usize), HpackError> {
     // if the first bytes is 1, then it's not supported
     let huffman = first & HUFFMAN_FLAG != 0;
 
-    let (length, consumed) = decode_integer(input, LENGTH_PREFIX_BITS)?;
+    let (string_length, consumed) = decode_integer(input, LENGTH_PREFIX_BITS)?;
 
     if huffman {
         return Err(HpackError::HuffmanUnsupported);
     }
 
-    let end = consumed + length;
-    println!(
-        "---2. input: {}, consumed: {}. length: {}",
-        end, consumed, length,
-    );
+    let end = consumed + string_length;
 
     let data = input.get(consumed..end).ok_or(HpackError::Truncated)?;
 
-    println!("cool",);
     Ok((data.to_vec(), end))
 }
 

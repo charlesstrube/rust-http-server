@@ -12,6 +12,10 @@ pub struct DynamicTable {
     limit: usize,
 }
 
+fn get_size(name: &Vec<u8>, value: &Vec<u8>) -> usize {
+    name.len() + value.len() + 32
+}
+
 impl DynamicTable {
     // `limit` is the SETTINGS_HEADER_TABLE_SIZE we announced: the maximum size
     // starts there, and a size update can never go above it.
@@ -35,7 +39,7 @@ impl DynamicTable {
 
     // Adds an entry as the most recent one, evicting the oldest ones to make room.
     pub fn insert(&mut self, name: Vec<u8>, value: Vec<u8>) {
-        let header_size = name.len() + value.len() + 32;
+        let header_size = get_size(&name, &value);
 
         while self.size() + header_size > self.max_size {
             if self.value.pop_back().is_none() {
@@ -71,7 +75,7 @@ impl DynamicTable {
     pub fn size(&self) -> usize {
         let mut size = 0usize;
         for (name, value) in self.value.iter() {
-            size += name.len() + value.len() + 32usize;
+            size += get_size(&name, &value);
         }
 
         size

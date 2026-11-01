@@ -58,6 +58,7 @@ pub fn decode_integer(input: &[u8], prefix_bits: u8) -> Result<(usize, usize), H
             .checked_add((chunk as usize) << moving)
             .ok_or(HpackError::Overflow)?;
 
+        // if 1, we continue, if it's 0 then it's the last byte
         if byte & CONTINUATION_FLAG == 0 {
             return Ok((result, count));
         }

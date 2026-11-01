@@ -1,15 +1,10 @@
 use crate::http2::hpack::{
-    HpackError, dynamic_table::DynamicTable, integer::decode_integer, static_table::get,
+    HpackError, dynamic_table::DynamicTable, integer::decode_integer, static_table,
     string::decode_string,
 };
 
-/*
-0x80..=0xFF     1xxx xxxx   indexed
-0x40..=0x7F	    01xx xxxx	literal + indexing
-0x20..=0x3F	    001x xxxx	size update
-0x10..=0x1F	    0001 xxxx	never indexed
-0x00..=0x0F	    0000 xxxx	no indexing
-*/
+const STATIC_TABLE_LEN: usize = 61;
+
 enum DecoderDecision {
     Indexed,
     LiteralIndexing,
@@ -24,23 +19,21 @@ pub struct Decoder {
     table: DynamicTable,
 }
 
-fn get_decision(byte: &u8) -> DecoderDecision {
-    if byte & 0x80 == 0b1000_0000 {
-        println!("DecoderDecision::Indexed");
-        DecoderDecision::Indexed
-    } else if byte & 0xC0 == 0b0100_0000 {
-        println!("DecoderDecision::LiteralIndexing");
-        DecoderDecision::LiteralIndexing
-    } else if byte & 0xF0 == 0b0000_0000 {
-        println!("DecoderDecision::NoIndexing");
-        DecoderDecision::NoIndexing
-    } else if byte & 0xF0 == 0b0001_0000 {
-        println!("DecoderDecision::NeverIndexed");
-        DecoderDecision::NeverIndexed
-    } else {
-        println!("DecoderDecision::SizeUpdate");
-        // 0010_0000
-        DecoderDecision::SizeUpdate
+// RFC 7541 §6: the high bits of the first byte select the representation,
+// the low bits (x) start its prefixed integer.
+// The ranges cover every u8 value, so the compiler checks nothing is missing.
+fn get_decision(byte: u8) -> DecoderDecision {
+    match byte {
+        // 1xxx xxxx: 1000_0000..=1111_1111
+        0x80..=0xFF => DecoderDecision::Indexed,
+        // 01xx xxxx: 0100_0000..=0111_1111
+        0x40..=0x7F => DecoderDecision::LiteralIndexing,
+        // 001x xxxx: 0010_0000..=0011_1111
+        0x20..=0x3F => DecoderDecision::SizeUpdate,
+        // 0001 xxxx: 0001_0000..=0001_1111
+        0x10..=0x1F => DecoderDecision::NeverIndexed,
+        // 0000 xxxx: 0000_0000..=0000_1111
+        0x00..=0x0F => DecoderDecision::NoIndexing,
     }
 }
 
@@ -52,54 +45,58 @@ impl Decoder {
         }
     }
 
+    fn resolve(&self, index_id: usize) -> Result<(Vec<u8>, Vec<u8>), HpackError> {
+        if index_id <= STATIC_TABLE_LEN {
+            let (name, value) = static_table::get(index_id)?;
+            Ok((name.as_bytes().to_vec(), value.as_bytes().to_vec()))
+        } else {
+            let index = index_id
+                .checked_sub(STATIC_TABLE_LEN)
+                .ok_or(HpackError::InvalidIndex)?;
+            let (name, value) = self.table.get(index)?;
+            Ok((name.to_vec(), value.to_vec()))
+        }
+    }
+
+    fn read_literal(
+        &self,
+        block: &[u8],
+        prefix_bits: u8,
+    ) -> Result<(Vec<u8>, Vec<u8>, usize), HpackError> {
+        let mut cursor = 0;
+        let (index_id, consumed) = decode_integer(block, prefix_bits)?;
+        cursor += consumed;
+        let name = if index_id == 0 {
+            let (name, consumed) = decode_string(&block[cursor..])?;
+            cursor += consumed;
+            name
+        } else {
+            self.resolve(index_id)?.0
+        };
+        let (value, consumed) = decode_string(&block[(cursor)..])?;
+        cursor += consumed;
+
+        Ok((name, value, cursor))
+    }
+
     // Decodes one complete header block: the HEADERS payload, plus any
     // CONTINUATION payloads, concatenated.
     pub fn decode(&mut self, block: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, HpackError> {
-        let mut pos = 0;
+        let mut cursor = 0;
 
         let mut list = vec![];
-        while pos < block.len() {
-            let mut cursor = pos;
-            let byte = block[pos];
+        while cursor < block.len() {
+            let byte = block[cursor];
 
-            let decode_interger_and_update = |number: u8| -> Result<usize, HpackError> {
-                let (number, consumed) = decode_integer(&block[cursor..], number)?;
-                cursor += consumed;
-                Ok(number)
-            };
-
-            let decode_string_and_update = || -> Result<Vec<u8>, HpackError> {
-                let (value, consumed) = decode_string(&block[cursor..])?;
-                cursor += consumed;
-                Ok(value)
-            };
-
-            match get_decision(&byte) {
+            match get_decision(byte) {
                 DecoderDecision::LiteralIndexing => {
-                    let (index_id, consumed) = decode_integer(&block[cursor..], 6)?;
+                    let (name, value, consumed) = self.read_literal(&block[cursor..], 6)?;
                     cursor += consumed;
-
-                    let name = if index_id == 0 {
-                        let (name, consumed) = decode_string(&block[cursor..])?;
-                        cursor += consumed;
-                        name
-                    } else if index_id < 62 {
-                        let (name, _) = get(index_id)?;
-                        name.as_bytes().to_vec()
-                    } else {
-                        let index = index_id.checked_sub(61).ok_or(HpackError::InvalidIndex)?;
-                        let (name, _) = self.table.get(index)?;
-                        name.to_vec()
-                    };
-
-                    let (value, consumed) = decode_string(&block[(cursor)..])?;
-                    cursor += consumed;
-
                     list.push((name.clone(), value.clone()));
                     self.table.insert(name, value);
                 }
                 DecoderDecision::SizeUpdate => {
-                    if list.len() > 0 {
+                    if !list.is_empty() {
                         return Err(HpackError::UnexpectedTableSizeUpdate);
                     }
                     let (value, consumed) = decode_integer(&block[cursor..], 5)?;
@@ -109,37 +106,14 @@ impl Decoder {
                 DecoderDecision::Indexed => {
                     let (index_id, consumed) = decode_integer(&block[cursor..], 7)?;
                     cursor += consumed;
-                    if index_id < 62 {
-                        let (name, value) = get(index_id)?;
-                        list.push((name.as_bytes().to_vec(), value.as_bytes().to_vec()));
-                    } else {
-                        let index = index_id.checked_sub(61).ok_or(HpackError::InvalidIndex)?;
-                        let (name, value) = self.table.get(index)?;
-                        list.push((name.to_vec(), value.to_vec()));
-                    }
+                    list.push(self.resolve(index_id)?);
                 }
                 DecoderDecision::NoIndexing | DecoderDecision::NeverIndexed => {
-                    let (index_id, consumed) = decode_integer(&block[cursor..], 4)?;
+                    let (name, value, consumed) = self.read_literal(&block[cursor..], 4)?;
                     cursor += consumed;
-                    let name = if index_id == 0 {
-                        let (name, consumed) = decode_string(&block[cursor..])?;
-                        cursor += consumed;
-                        name
-                    } else if index_id < 62 {
-                        let (name, _) = get(index_id)?;
-                        name.as_bytes().to_vec()
-                    } else {
-                        let index = index_id.checked_sub(61).ok_or(HpackError::InvalidIndex)?;
-                        let (name, _) = self.table.get(index)?;
-                        name.to_vec()
-                    };
-                    let (value, consumed) = decode_string(&block[(cursor)..])?;
-                    cursor += consumed;
-
-                    list.push((name.clone(), value.clone()));
+                    list.push((name, value));
                 }
             }
-            pos = cursor;
         }
 
         Ok(list)
