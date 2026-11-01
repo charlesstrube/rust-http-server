@@ -1,4 +1,5 @@
 pub mod integer;
+pub mod static_table;
 pub mod string;
 
 // RFC 9113 §4.3: any HPACK decoding error is a connection error (COMPRESSION_ERROR).
@@ -8,6 +9,8 @@ pub enum HpackError {
     Truncated,
     #[error("Integer overflow")]
     Overflow,
+    #[error("Invalid table index")]
+    InvalidIndex,
     // Temporary: Huffman decoding comes with sub-step 4.6.
     #[error("Huffman decoding not supported")]
     HuffmanUnsupported,
