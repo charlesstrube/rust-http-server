@@ -32,9 +32,14 @@ pub fn decode_string(input: &[u8]) -> Result<(Vec<u8>, usize), HpackError> {
     }
 
     let end = consumed + length;
+    println!(
+        "---2. input: {}, consumed: {}. length: {}",
+        end, consumed, length,
+    );
 
     let data = input.get(consumed..end).ok_or(HpackError::Truncated)?;
 
+    println!("cool",);
     Ok((data.to_vec(), end))
 }
 
