@@ -1,4 +1,4 @@
-use crate::http2::hpack::{HpackError, integer::decode_integer};
+use crate::http2::hpack::{HpackError, huffman::decode_huffman, integer::decode_integer};
 
 const HUFFMAN_FLAG: u8 = 0x80;
 const LENGTH_PREFIX_BITS: u8 = 7;
@@ -20,20 +20,24 @@ const LENGTH_PREFIX_BITS: u8 = 7;
 // bytes and the data starts later: always slice from `consumed`, never from 1.
 // With H = 1 the data is Huffman-coded (sub-step 4.6).
 pub fn decode_string(input: &[u8]) -> Result<(Vec<u8>, usize), HpackError> {
-    let first = input.first().ok_or(HpackError::Truncated)?;
+    let first = input.first().ok_or(HpackError::InvalidTruncated)?;
 
     // if the first bytes is 1, then it's not supported
     let huffman = first & HUFFMAN_FLAG != 0;
 
     let (string_length, consumed) = decode_integer(input, LENGTH_PREFIX_BITS)?;
 
-    if huffman {
-        return Err(HpackError::HuffmanUnsupported);
-    }
-
     let end = consumed + string_length;
 
-    let data = input.get(consumed..end).ok_or(HpackError::Truncated)?;
+    let data = input
+        .get(consumed..end)
+        .ok_or(HpackError::InvalidTruncated)?;
+
+    if huffman {
+        let value = decode_huffman(&data)?;
+
+        return Ok((value, end));
+    }
 
     Ok((data.to_vec(), end))
 }
@@ -112,21 +116,54 @@ mod test {
 
     // --- H bit ---
 
-    // C.4.1: 0x8c = H 1 + length 12. The H bit is never part of the length.
+    // C.4.1: 0x8c = H 1 + length 12. The H bit is never part of the length,
+    // and the length counts encoded bytes (12), not decoded ones (15).
     #[test]
-    fn huffman_strings_are_not_supported_yet() {
+    fn decodes_a_huffman_string() {
         let input = [
             0x8c, 0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a, 0x6b, 0xa0, 0xab, 0x90, 0xf4, 0xff,
         ];
 
-        assert_eq!(decode_string(&input), Err(HpackError::HuffmanUnsupported));
+        assert_eq!(decode_string(&input), Ok((b"www.example.com".to_vec(), 13)));
+    }
+
+    // Only the announced length is Huffman data: what follows is not decoded.
+    #[test]
+    fn huffman_string_stops_after_its_length() {
+        let input = [0x82, 0x64, 0x02, 0x82, 0x86];
+
+        assert_eq!(decode_string(&input), Ok((b"302".to_vec(), 3)));
+    }
+
+    // 0x80 = H 1 + length 0: an empty Huffman string is legal.
+    #[test]
+    fn decodes_an_empty_huffman_string() {
+        assert_eq!(decode_string(&[0x80]), Ok((vec![], 1)));
+    }
+
+    // The announced length is checked before decoding.
+    #[test]
+    fn truncated_huffman_data_is_truncated() {
+        assert_eq!(
+            decode_string(&[0x8c, 0xf1, 0xe3]),
+            Err(HpackError::InvalidTruncated)
+        );
+    }
+
+    // Huffman errors are propagated as is.
+    #[test]
+    fn huffman_errors_are_propagated() {
+        assert_eq!(
+            decode_string(&[0x81, 0b0001_1110]),
+            Err(HpackError::InvalidHuffmanPadding)
+        );
     }
 
     // --- Errors ---
 
     #[test]
     fn empty_input_is_truncated() {
-        assert_eq!(decode_string(&[]), Err(HpackError::Truncated));
+        assert_eq!(decode_string(&[]), Err(HpackError::InvalidTruncated));
     }
 
     // The length announces 15 bytes, only 3 are there.
@@ -135,7 +172,7 @@ mod test {
         let mut input = vec![0x0f];
         input.extend_from_slice(b"www");
 
-        assert_eq!(decode_string(&input), Err(HpackError::Truncated));
+        assert_eq!(decode_string(&input), Err(HpackError::InvalidTruncated));
     }
 
     // A peer announcing ~268 MB with a few bytes must not make us allocate them.
@@ -143,7 +180,7 @@ mod test {
     fn huge_announced_length_is_truncated() {
         let input = [0b0111_1111, 0xFF, 0xFF, 0xFF, 0x7F, b'a'];
 
-        assert_eq!(decode_string(&input), Err(HpackError::Truncated));
+        assert_eq!(decode_string(&input), Err(HpackError::InvalidTruncated));
     }
 
     // Errors from the length integer are propagated as is.
@@ -153,6 +190,6 @@ mod test {
         input.extend_from_slice(&[0xFF; 10]);
         input.push(0x01);
 
-        assert_eq!(decode_string(&input), Err(HpackError::Overflow));
+        assert_eq!(decode_string(&input), Err(HpackError::InvalidOverflow));
     }
 }

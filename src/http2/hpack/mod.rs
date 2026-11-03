@@ -1,5 +1,6 @@
 pub mod decoder;
 pub mod dynamic_table;
+pub mod huffman;
 pub mod integer;
 pub mod static_table;
 pub mod string;
@@ -8,9 +9,9 @@ pub mod string;
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum HpackError {
     #[error("Truncated input")]
-    Truncated,
+    InvalidTruncated,
     #[error("Integer overflow")]
-    Overflow,
+    InvalidOverflow,
     #[error("Invalid table index")]
     InvalidIndex,
     #[error("Table size update above SETTINGS_HEADER_TABLE_SIZE")]
@@ -21,4 +22,10 @@ pub enum HpackError {
     // Temporary: Huffman decoding comes with sub-step 4.6.
     #[error("Huffman decoding not supported")]
     HuffmanUnsupported,
+    // RFC 7541 §5.2: padding is at most 7 bits, all set to 1.
+    #[error("Invalid Huffman padding")]
+    InvalidHuffmanPadding,
+    // RFC 7541 §5.2: EOS must never appear in the data.
+    #[error("EOS symbol in Huffman data")]
+    HuffmanEos,
 }

@@ -259,27 +259,30 @@ mod test {
     // The value string is missing entirely.
     #[test]
     fn literal_without_its_value_is_truncated() {
-        assert_eq!(decode(&[0x04]), Err(HpackError::Truncated));
+        assert_eq!(decode(&[0x04]), Err(HpackError::InvalidTruncated));
     }
 
     // The value announces 5 bytes but only 1 follows.
     #[test]
     fn literal_with_a_short_value_is_truncated() {
-        assert_eq!(decode(&[0x04, 0x05, b'/']), Err(HpackError::Truncated));
+        assert_eq!(
+            decode(&[0x04, 0x05, b'/']),
+            Err(HpackError::InvalidTruncated)
+        );
     }
 
     // A truncated field after a valid one fails the whole block.
     #[test]
     fn error_after_a_valid_field_fails_the_block() {
-        assert_eq!(decode(&[0x82, 0x04]), Err(HpackError::Truncated));
+        assert_eq!(decode(&[0x82, 0x04]), Err(HpackError::InvalidTruncated));
     }
 
-    // Until 4.6, a Huffman-encoded value must surface the string error.
+    // A Huffman error inside a field fails the whole block.
     #[test]
-    fn huffman_value_is_not_supported_yet() {
+    fn invalid_huffman_value_fails_the_block() {
         assert_eq!(
             decode(&[0x04, 0x81, 0x00]),
-            Err(HpackError::HuffmanUnsupported)
+            Err(HpackError::InvalidHuffmanPadding)
         );
     }
 
@@ -461,5 +464,116 @@ mod test {
             decode(&[0x3f, 0xe2, 0x1f]),
             Err(HpackError::InvalidTableSize)
         );
+    }
+
+    // --- RFC 7541 Appendix C.4: C.3 with Huffman (4.6) ---
+
+    // The RFC hex dumps, spaces ignored.
+    fn hex(dump: &str) -> Vec<u8> {
+        let digits: Vec<char> = dump.chars().filter(|c| !c.is_whitespace()).collect();
+        digits
+            .chunks(2)
+            .map(|pair| u8::from_str_radix(&pair.iter().collect::<String>(), 16).unwrap())
+            .collect()
+    }
+
+    const C_4_1: &str = "8286 8441 8cf1 e3c2 e5f2 3a6b a0ab 90f4 ff";
+    const C_4_2: &str = "8286 84be 5886 a8eb 1064 9cbf";
+    const C_4_3: &str = "8287 85bf 4088 25a8 49e9 5ba9 7d7f 8925 a849 e95b b8e8 b4bf";
+
+    // The table stores decoded values: same sizes as C.3.
+    #[test]
+    fn c_4_huffman_requests() {
+        let mut decoder = Decoder::new(DEFAULT_LIMIT);
+
+        assert_eq!(
+            decode_with(&mut decoder, &hex(C_4_1)),
+            Ok(pairs(&[
+                (":method", "GET"),
+                (":scheme", "http"),
+                (":path", "/"),
+                (":authority", "www.example.com"),
+            ]))
+        );
+        assert_eq!(decoder.table.size(), 57);
+
+        assert_eq!(
+            decode_with(&mut decoder, &hex(C_4_2)),
+            Ok(pairs(&[
+                (":method", "GET"),
+                (":scheme", "http"),
+                (":path", "/"),
+                (":authority", "www.example.com"),
+                ("cache-control", "no-cache"),
+            ]))
+        );
+        assert_eq!(decoder.table.size(), 110);
+
+        assert_eq!(
+            decode_with(&mut decoder, &hex(C_4_3)),
+            Ok(pairs(&[
+                (":method", "GET"),
+                (":scheme", "https"),
+                (":path", "/index.html"),
+                (":authority", "www.example.com"),
+                ("custom-key", "custom-value"),
+            ]))
+        );
+        assert_eq!(decoder.table.size(), 164);
+    }
+
+    // --- RFC 7541 Appendix C.6: responses with Huffman and evictions ---
+
+    const C_6_1: &str = "4882 6402 5885 aec3 771a 4b61 96d0 7abe 9410 54d4 44a8 2005 9504 0b81 \
+                         66e0 82a6 2d1b ff6e 919d 29ad 1718 63c7 8f0b 97c8 e9ae 82ae 43d3";
+    const C_6_2: &str = "4883 640e ffc1 c0bf";
+    const C_6_3: &str = "88c1 6196 d07a be94 1054 d444 a820 0595 040b 8166 e084 a62d 1bff c05a \
+                         839b d9ab 77ad 94e7 821d d7f2 e6c7 b335 dfdf cd5b 3960 d5af 2708 7f36 \
+                         72c1 ab27 0fb5 291f 9587 3160 65c0 03ed 4ee5 b106 3d50 07";
+
+    // SETTINGS_HEADER_TABLE_SIZE = 256: each response evicts older entries.
+    #[test]
+    fn c_6_huffman_responses_with_evictions() {
+        let mut decoder = Decoder::new(256);
+
+        assert_eq!(
+            decode_with(&mut decoder, &hex(C_6_1)),
+            Ok(pairs(&[
+                (":status", "302"),
+                ("cache-control", "private"),
+                ("date", "Mon, 21 Oct 2013 20:13:21 GMT"),
+                ("location", "https://www.example.com"),
+            ]))
+        );
+        assert_eq!(decoder.table.size(), 222);
+
+        // ":status: 302" (42 bytes) is evicted to make room for ":status: 307".
+        assert_eq!(
+            decode_with(&mut decoder, &hex(C_6_2)),
+            Ok(pairs(&[
+                (":status", "307"),
+                ("cache-control", "private"),
+                ("date", "Mon, 21 Oct 2013 20:13:21 GMT"),
+                ("location", "https://www.example.com"),
+            ]))
+        );
+        assert_eq!(decoder.table.size(), 222);
+
+        assert_eq!(
+            decode_with(&mut decoder, &hex(C_6_3)),
+            Ok(pairs(&[
+                (":status", "200"),
+                ("cache-control", "private"),
+                ("date", "Mon, 21 Oct 2013 20:13:22 GMT"),
+                ("location", "https://www.example.com"),
+                ("content-encoding", "gzip"),
+                (
+                    "set-cookie",
+                    "foo=ASDJKHQKBZXOQWEOPIUAXQWEOIU; max-age=3600; version=1",
+                ),
+            ]))
+        );
+        assert_eq!(decoder.table.size(), 215);
+        assert_eq!(decoder.table.len(), 3);
     }
 }

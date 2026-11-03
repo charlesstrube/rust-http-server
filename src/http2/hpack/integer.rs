@@ -35,7 +35,7 @@ const CONTINUATION_FLAG: u8 = 0x80;
 // At most MAX_CONTINUATION_BYTES follow: this bounds the shift and rejects
 // a peer sending endless continuation bytes.
 pub fn decode_integer(input: &[u8], prefix_bits: u8) -> Result<(usize, usize), HpackError> {
-    let first = input.first().ok_or(HpackError::Truncated)?;
+    let first = input.first().ok_or(HpackError::InvalidTruncated)?;
 
     let mask = u8::MAX >> (8 - prefix_bits);
     let value = first & mask;
@@ -48,7 +48,7 @@ pub fn decode_integer(input: &[u8], prefix_bits: u8) -> Result<(usize, usize), H
 
     for (index, byte) in input[1..].iter().enumerate() {
         if index >= MAX_CONTINUATION_BYTES {
-            return Err(HpackError::Overflow);
+            return Err(HpackError::InvalidOverflow);
         }
         let count = index + 2; // we are on the second chunk
         let chunk = byte & CHUNK_MASK;
@@ -56,14 +56,14 @@ pub fn decode_integer(input: &[u8], prefix_bits: u8) -> Result<(usize, usize), H
 
         result = result
             .checked_add((chunk as usize) << moving)
-            .ok_or(HpackError::Overflow)?;
+            .ok_or(HpackError::InvalidOverflow)?;
 
         // if 1, we continue, if it's 0 then it's the last byte
         if byte & CONTINUATION_FLAG == 0 {
             return Ok((result, count));
         }
     }
-    Err(HpackError::Truncated)
+    Err(HpackError::InvalidTruncated)
 }
 
 #[cfg(test)]
@@ -154,14 +154,14 @@ mod test {
 
     #[test]
     fn empty_input_is_truncated() {
-        assert_eq!(decode_integer(&[], 5), Err(HpackError::Truncated));
+        assert_eq!(decode_integer(&[], 5), Err(HpackError::InvalidTruncated));
     }
 
     #[test]
     fn missing_continuation_byte_is_truncated() {
         assert_eq!(
             decode_integer(&[0b0001_1111], 5),
-            Err(HpackError::Truncated)
+            Err(HpackError::InvalidTruncated)
         );
     }
 
@@ -170,7 +170,7 @@ mod test {
     fn unfinished_continuation_is_truncated() {
         assert_eq!(
             decode_integer(&[0b0001_1111, 0b1001_1010], 5),
-            Err(HpackError::Truncated)
+            Err(HpackError::InvalidTruncated)
         );
     }
 
@@ -181,7 +181,7 @@ mod test {
         input.extend_from_slice(&[0xFF; 10]);
         input.push(0b0000_0001);
 
-        assert_eq!(decode_integer(&input, 5), Err(HpackError::Overflow));
+        assert_eq!(decode_integer(&input, 5), Err(HpackError::InvalidOverflow));
     }
 
     // The limit itself is accepted: 5 continuation bytes, the last chunk shifted by 28.
@@ -197,6 +197,6 @@ mod test {
     fn rejects_one_continuation_byte_past_the_limit() {
         let input = [0b0001_1111, 0x80, 0x80, 0x80, 0x80, 0x80, 0b0000_0001];
 
-        assert_eq!(decode_integer(&input, 5), Err(HpackError::Overflow));
+        assert_eq!(decode_integer(&input, 5), Err(HpackError::InvalidOverflow));
     }
 }
