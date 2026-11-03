@@ -19,6 +19,9 @@ pub struct Decoder {
     table: DynamicTable,
 }
 
+// RFC 7541 §1.3: a header field is a (name, value) pair of raw bytes.
+pub type HeaderField = (Vec<u8>, Vec<u8>);
+
 // RFC 7541 §6: the high bits of the first byte select the representation,
 // the low bits (x) start its prefixed integer.
 // The ranges cover every u8 value, so the compiler checks nothing is missing.
@@ -45,7 +48,7 @@ impl Decoder {
         }
     }
 
-    fn resolve(&self, index_id: usize) -> Result<(Vec<u8>, Vec<u8>), HpackError> {
+    fn resolve(&self, index_id: usize) -> Result<HeaderField, HpackError> {
         if index_id <= STATIC_TABLE_LEN {
             let (name, value) = static_table::get(index_id)?;
             Ok((name.as_bytes().to_vec(), value.as_bytes().to_vec()))
@@ -81,7 +84,7 @@ impl Decoder {
 
     // Decodes one complete header block: the HEADERS payload, plus any
     // CONTINUATION payloads, concatenated.
-    pub fn decode(&mut self, block: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, HpackError> {
+    pub fn decode(&mut self, block: &[u8]) -> Result<Vec<HeaderField>, HpackError> {
         let mut cursor = 0;
 
         let mut list = vec![];

@@ -19,9 +19,6 @@ pub enum HpackError {
     // RFC 7541 §4.2: a size update is only allowed at the start of a header block.
     #[error("Table size update after a header field")]
     UnexpectedTableSizeUpdate,
-    // Temporary: Huffman decoding comes with sub-step 4.6.
-    #[error("Huffman decoding not supported")]
-    HuffmanUnsupported,
     // RFC 7541 §5.2: padding is at most 7 bits, all set to 1.
     #[error("Invalid Huffman padding")]
     InvalidHuffmanPadding,

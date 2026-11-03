@@ -70,7 +70,7 @@ pub fn get(index: usize) -> Result<(&'static str, &'static str), HpackError> {
     let index = index.checked_sub(1).ok_or(HpackError::InvalidIndex)?;
 
     match STATIC_TABLE.get(index) {
-        Some(value) => Ok(value.clone()),
+        Some(value) => Ok(*value),
         None => Err(HpackError::InvalidIndex),
     }
 }

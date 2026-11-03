@@ -30,7 +30,7 @@ pub fn react(decision: Decision, mut writer: impl Write) -> bool {
 pub fn serve(
     mut reader: impl BufRead, // reader
     mut writer: impl Write,   // writer
-    handler: impl Fn(&Request) -> Response,
+    _handler: impl Fn(&Request) -> Response,
 ) {
     let local_settings = Settings::default();
     let mut peer_settings = Settings::default();

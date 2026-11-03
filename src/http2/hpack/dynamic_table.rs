@@ -12,7 +12,7 @@ pub struct DynamicTable {
     limit: usize,
 }
 
-fn get_size(name: &Vec<u8>, value: &Vec<u8>) -> usize {
+fn get_size(name: &[u8], value: &[u8]) -> usize {
     name.len() + value.len() + 32
 }
 
@@ -75,7 +75,7 @@ impl DynamicTable {
     pub fn size(&self) -> usize {
         let mut size = 0usize;
         for (name, value) in self.value.iter() {
-            size += get_size(&name, &value);
+            size += get_size(name, value);
         }
 
         size

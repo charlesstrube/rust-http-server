@@ -1,4 +1,4 @@
-use std::vec;
+use std::sync::LazyLock;
 
 use crate::http2::hpack::HpackError;
 
@@ -268,12 +268,83 @@ pub const CODES: [(u32, usize); 257] = [
     (0x3fffffff, 30), // 256 EOS
 ];
 
+#[derive(Default, Debug, PartialEq)]
+struct Node {
+    children: [Option<usize>; 2],
+    symbol: Option<u16>,
+}
+
+fn build_btree() -> Vec<Node> {
+    let mut tree = vec![Node::default()];
+    for (code_index, (code, length)) in CODES.iter().enumerate() {
+        let mut current_index = 0;
+        for index in (0..*length).rev() {
+            let bit = (code >> index) & 1;
+            let children_index = bit as usize;
+            match tree[current_index].children[children_index] {
+                Some(sub_node_index) => current_index = sub_node_index,
+                None => {
+                    let mut node = Node::default();
+                    tree[current_index].children[children_index] = Some(tree.len());
+                    current_index = tree.len();
+                    if index == 0 {
+                        node.symbol = Some(code_index as u16);
+                        current_index = 0;
+                    }
+
+                    tree.push(node);
+                }
+            }
+        }
+    }
+
+    tree
+}
+
+static TREE: LazyLock<Vec<Node>> = LazyLock::new(build_btree);
+
 // RFC 7541 §5.2: decodes Huffman-coded string data (the bytes after the length).
 //
 // Bits are read most significant first. The data ends with 0 to 7 padding bits,
 // all set to 1 (the start of EOS). Errors:
 // - padding longer than 7 bits, or not made only of 1s → InvalidHuffmanPadding
 // - the EOS symbol decoded inside the data              → HuffmanEos
+
+pub fn decode_huffman_btree(input: &[u8]) -> Result<Vec<u8>, HpackError> {
+    let mut symbols: Vec<u8> = vec![];
+    let mut nbits: usize = 0;
+    let mut has_0s = false;
+    let mut current_index = 0;
+
+    for byte in input.iter() {
+        for bit_index in (0..8).rev() {
+            let bit = (byte >> bit_index) & 1;
+            nbits += 1;
+
+            if bit == 0 {
+                has_0s = true
+            }
+
+            let node_index = TREE[current_index].children[bit as usize].expect("complete code");
+            if TREE[node_index].symbol.is_some() {
+                let symbol = TREE[node_index].symbol.expect("complete code");
+                symbols.push(u8::try_from(symbol).map_err(|_| HpackError::HuffmanEos)?);
+                current_index = 0;
+                nbits = 0;
+                has_0s = false;
+            } else {
+                current_index = node_index;
+            }
+        }
+    }
+
+    if nbits >= 8 && !has_0s || nbits != 0 && has_0s {
+        return Err(HpackError::InvalidHuffmanPadding);
+    }
+
+    Ok(symbols)
+}
+
 pub fn decode_huffman(input: &[u8]) -> Result<Vec<u8>, HpackError> {
     let mut acc: u32 = 0;
     let mut symbols: Vec<u8> = vec![];
@@ -301,8 +372,6 @@ pub fn decode_huffman(input: &[u8]) -> Result<Vec<u8>, HpackError> {
         }
     }
 
-    println!("acc: {}, has 0s: {}, nbits: {}", acc, has_0s, nbits);
-
     if nbits >= 8 && !has_0s || nbits != 0 && has_0s {
         return Err(HpackError::InvalidHuffmanPadding);
     }
@@ -315,7 +384,7 @@ mod test {
     use super::*;
 
     fn decoded(hex: &[u8]) -> Result<String, HpackError> {
-        decode_huffman(hex).map(|bytes| String::from_utf8(bytes).unwrap())
+        decode_huffman_btree(hex).map(|bytes| String::from_utf8(bytes).unwrap())
     }
 
     // --- The table ---
@@ -438,7 +507,10 @@ mod test {
     #[test]
     fn decodes_non_utf8_bytes() {
         // 0x3ffffee on 26 bits, then 6 bits of padding.
-        assert_eq!(decode_huffman(&[0xff, 0xff, 0xfb, 0xbf]), Ok(vec![0xff]));
+        assert_eq!(
+            decode_huffman_btree(&[0xff, 0xff, 0xfb, 0xbf]),
+            Ok(vec![0xff])
+        );
     }
 
     // --- Errors (RFC 7541 §5.2) ---
@@ -447,7 +519,7 @@ mod test {
     #[test]
     fn padding_with_a_zero_is_rejected() {
         assert_eq!(
-            decode_huffman(&[0b0001_1110]),
+            decode_huffman_btree(&[0b0001_1110]),
             Err(HpackError::InvalidHuffmanPadding)
         );
     }
@@ -456,7 +528,7 @@ mod test {
     #[test]
     fn padding_of_zeros_is_rejected() {
         assert_eq!(
-            decode_huffman(&[0b0001_1000]),
+            decode_huffman_btree(&[0b0001_1000]),
             Err(HpackError::InvalidHuffmanPadding)
         );
     }
@@ -465,7 +537,7 @@ mod test {
     #[test]
     fn single_zero_bit_of_padding_is_rejected() {
         assert_eq!(
-            decode_huffman(&[0b1111_0000]),
+            decode_huffman_btree(&[0b1111_0000]),
             Err(HpackError::InvalidHuffmanPadding)
         );
     }
@@ -474,7 +546,7 @@ mod test {
     #[test]
     fn padding_with_a_zero_in_the_middle_is_rejected() {
         assert_eq!(
-            decode_huffman(&[0b0001_1101]),
+            decode_huffman_btree(&[0b0001_1101]),
             Err(HpackError::InvalidHuffmanPadding)
         );
     }
@@ -483,7 +555,7 @@ mod test {
     #[test]
     fn padding_starting_with_a_zero_is_rejected() {
         assert_eq!(
-            decode_huffman(&[0b0001_1011]),
+            decode_huffman_btree(&[0b0001_1011]),
             Err(HpackError::InvalidHuffmanPadding)
         );
     }
@@ -492,7 +564,7 @@ mod test {
     #[test]
     fn padding_longer_than_7_bits_is_rejected() {
         assert_eq!(
-            decode_huffman(&[0b0001_1111, 0xff]),
+            decode_huffman_btree(&[0b0001_1111, 0xff]),
             Err(HpackError::InvalidHuffmanPadding)
         );
     }
@@ -501,7 +573,7 @@ mod test {
     #[test]
     fn a_byte_of_padding_alone_is_rejected() {
         assert_eq!(
-            decode_huffman(&[0xff]),
+            decode_huffman_btree(&[0xff]),
             Err(HpackError::InvalidHuffmanPadding)
         );
     }
@@ -510,8 +582,145 @@ mod test {
     #[test]
     fn eos_in_the_data_is_rejected() {
         assert_eq!(
-            decode_huffman(&[0xff, 0xff, 0xff, 0xff]),
+            decode_huffman_btree(&[0xff, 0xff, 0xff, 0xff]),
             Err(HpackError::HuffmanEos)
         );
+    }
+
+    // --- The tree (arena: index 0 is the root, children are indices) ---
+
+    // Follows `len` bits of `code` from the root, most significant first.
+    // None if a child is missing on the way.
+    fn walk(tree: &[Node], code: u32, len: usize) -> Option<&Node> {
+        let mut node = &tree[0];
+        for i in (0..len).rev() {
+            let bit = ((code >> i) & 1) as usize;
+            node = &tree[node.children[bit]?];
+        }
+        Some(node)
+    }
+
+    fn is_leaf(node: &Node) -> bool {
+        node.children == [None, None]
+    }
+
+    // 257 leaves + 256 internal nodes: the code is complete (Kraft sum = 1).
+    #[test]
+    fn tree_has_513_nodes() {
+        assert_eq!(build_btree().len(), 513);
+    }
+
+    #[test]
+    fn tree_has_257_leaves() {
+        let tree = build_btree();
+
+        assert_eq!(tree.iter().filter(|node| is_leaf(node)).count(), 257);
+    }
+
+    // The root holds no symbol: no code is 0 bits long.
+    #[test]
+    fn root_is_an_internal_node() {
+        let tree = build_btree();
+
+        assert_eq!(tree[0].symbol, None);
+        assert!(tree[0].children[0].is_some());
+        assert!(tree[0].children[1].is_some());
+    }
+
+    // 'a' = 00011: left, left, left, right, right.
+    #[test]
+    fn a_is_at_the_end_of_00011() {
+        let tree = build_btree();
+        let node = walk(&tree, 0b00011, 5).unwrap();
+
+        assert_eq!(node.symbol, Some(b'a' as u16));
+        assert!(is_leaf(node));
+    }
+
+    // '3' = 011001: the example walked through in the explanation.
+    #[test]
+    fn three_is_at_the_end_of_011001() {
+        let tree = build_btree();
+
+        assert_eq!(walk(&tree, 0b011001, 6).unwrap().symbol, Some(b'3' as u16));
+    }
+
+    // EOS (256) does not fit in a u8: this is why symbols are u16.
+    #[test]
+    fn eos_is_at_the_end_of_thirty_ones() {
+        let tree = build_btree();
+
+        assert_eq!(walk(&tree, 0x3fff_ffff, 30).unwrap().symbol, Some(256));
+    }
+
+    // A prefix of a code leads to an internal node, never to a symbol.
+    #[test]
+    fn a_prefix_of_a_code_is_not_a_symbol() {
+        let tree = build_btree();
+        let node = walk(&tree, 0b0001, 4).unwrap(); // prefix of 'a' = 00011
+
+        assert_eq!(node.symbol, None);
+        assert!(!is_leaf(node));
+    }
+
+    #[test]
+    fn every_code_leads_to_its_symbol() {
+        let tree = build_btree();
+
+        for (symbol, &(code, len)) in CODES.iter().enumerate() {
+            let node =
+                walk(&tree, code, len).unwrap_or_else(|| panic!("no path for symbol {symbol}"));
+
+            assert_eq!(node.symbol, Some(symbol as u16), "symbol {symbol}");
+            assert!(is_leaf(node), "symbol {symbol} is not on a leaf");
+        }
+    }
+
+    // Prefix-free: a node is either a leaf with a symbol, or internal without one.
+    #[test]
+    fn symbols_are_only_on_leaves() {
+        for (index, node) in build_btree().iter().enumerate() {
+            assert_eq!(node.symbol.is_some(), is_leaf(node), "node {index}");
+        }
+    }
+
+    // Complete code: an internal node never has a single child, so decoding
+    // can never hit a dead end.
+    #[test]
+    fn internal_nodes_have_two_children() {
+        for (index, node) in build_btree().iter().enumerate() {
+            if !is_leaf(node) {
+                assert!(
+                    node.children[0].is_some() && node.children[1].is_some(),
+                    "node {index} has a single child"
+                );
+            }
+        }
+    }
+
+    // A tree, not a graph: every node except the root has exactly one parent,
+    // and nothing points back to the root.
+    #[test]
+    fn every_node_except_the_root_has_one_parent() {
+        let tree = build_btree();
+        let mut parents = vec![0; tree.len()];
+
+        for node in &tree {
+            for child in node.children.iter().flatten() {
+                parents[*child] += 1;
+            }
+        }
+
+        assert_eq!(parents[0], 0);
+        assert!(parents[1..].iter().all(|&count| count == 1));
+    }
+
+    // EOS followed by valid data: decoding must stop on the EOS leaf.
+    #[test]
+    fn tree_decoder_rejects_eos_before_more_data() {
+        // EOS (30 ones) + 'a' (00011) = 35 bits, then 5 bits of padding.
+        let input = [0xff, 0xff, 0xff, 0xfc, 0x7f];
+
+        assert_eq!(decode_huffman_btree(&input), Err(HpackError::HuffmanEos));
     }
 }
