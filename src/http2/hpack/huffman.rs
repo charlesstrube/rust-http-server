@@ -310,7 +310,7 @@ static TREE: LazyLock<Vec<Node>> = LazyLock::new(build_btree);
 // - padding longer than 7 bits, or not made only of 1s → InvalidHuffmanPadding
 // - the EOS symbol decoded inside the data              → HuffmanEos
 
-pub fn decode_huffman_btree(input: &[u8]) -> Result<Vec<u8>, HpackError> {
+pub fn decode_huffman(input: &[u8]) -> Result<Vec<u8>, HpackError> {
     let mut symbols: Vec<u8> = vec![];
     let mut nbits: usize = 0;
     let mut has_0s = false;
@@ -345,46 +345,12 @@ pub fn decode_huffman_btree(input: &[u8]) -> Result<Vec<u8>, HpackError> {
     Ok(symbols)
 }
 
-pub fn decode_huffman(input: &[u8]) -> Result<Vec<u8>, HpackError> {
-    let mut acc: u32 = 0;
-    let mut symbols: Vec<u8> = vec![];
-    let mut nbits: usize = 0;
-    let mut has_0s = false;
-    for byte in input.iter() {
-        for index in (0..8).rev() {
-            let bit = (byte >> index) & 1;
-            acc = (acc << 1) | u32::from(bit);
-            nbits += 1;
-
-            if bit == 0 {
-                has_0s = true
-            }
-
-            for (symbol, (code, len)) in CODES.iter().enumerate() {
-                if (code, len) == (&acc, &nbits) {
-                    symbols.push(u8::try_from(symbol).map_err(|_| HpackError::HuffmanEos)?);
-                    acc = 0;
-                    nbits = 0;
-                    has_0s = false;
-                    break;
-                }
-            }
-        }
-    }
-
-    if nbits >= 8 && !has_0s || nbits != 0 && has_0s {
-        return Err(HpackError::InvalidHuffmanPadding);
-    }
-
-    Ok(symbols)
-}
-
 #[cfg(test)]
 mod test {
     use super::*;
 
     fn decoded(hex: &[u8]) -> Result<String, HpackError> {
-        decode_huffman_btree(hex).map(|bytes| String::from_utf8(bytes).unwrap())
+        decode_huffman(hex).map(|bytes| String::from_utf8(bytes).unwrap())
     }
 
     // --- The table ---
@@ -507,10 +473,7 @@ mod test {
     #[test]
     fn decodes_non_utf8_bytes() {
         // 0x3ffffee on 26 bits, then 6 bits of padding.
-        assert_eq!(
-            decode_huffman_btree(&[0xff, 0xff, 0xfb, 0xbf]),
-            Ok(vec![0xff])
-        );
+        assert_eq!(decode_huffman(&[0xff, 0xff, 0xfb, 0xbf]), Ok(vec![0xff]));
     }
 
     // --- Errors (RFC 7541 §5.2) ---
@@ -519,7 +482,7 @@ mod test {
     #[test]
     fn padding_with_a_zero_is_rejected() {
         assert_eq!(
-            decode_huffman_btree(&[0b0001_1110]),
+            decode_huffman(&[0b0001_1110]),
             Err(HpackError::InvalidHuffmanPadding)
         );
     }
@@ -528,7 +491,7 @@ mod test {
     #[test]
     fn padding_of_zeros_is_rejected() {
         assert_eq!(
-            decode_huffman_btree(&[0b0001_1000]),
+            decode_huffman(&[0b0001_1000]),
             Err(HpackError::InvalidHuffmanPadding)
         );
     }
@@ -537,7 +500,7 @@ mod test {
     #[test]
     fn single_zero_bit_of_padding_is_rejected() {
         assert_eq!(
-            decode_huffman_btree(&[0b1111_0000]),
+            decode_huffman(&[0b1111_0000]),
             Err(HpackError::InvalidHuffmanPadding)
         );
     }
@@ -546,7 +509,7 @@ mod test {
     #[test]
     fn padding_with_a_zero_in_the_middle_is_rejected() {
         assert_eq!(
-            decode_huffman_btree(&[0b0001_1101]),
+            decode_huffman(&[0b0001_1101]),
             Err(HpackError::InvalidHuffmanPadding)
         );
     }
@@ -555,7 +518,7 @@ mod test {
     #[test]
     fn padding_starting_with_a_zero_is_rejected() {
         assert_eq!(
-            decode_huffman_btree(&[0b0001_1011]),
+            decode_huffman(&[0b0001_1011]),
             Err(HpackError::InvalidHuffmanPadding)
         );
     }
@@ -564,7 +527,7 @@ mod test {
     #[test]
     fn padding_longer_than_7_bits_is_rejected() {
         assert_eq!(
-            decode_huffman_btree(&[0b0001_1111, 0xff]),
+            decode_huffman(&[0b0001_1111, 0xff]),
             Err(HpackError::InvalidHuffmanPadding)
         );
     }
@@ -573,7 +536,7 @@ mod test {
     #[test]
     fn a_byte_of_padding_alone_is_rejected() {
         assert_eq!(
-            decode_huffman_btree(&[0xff]),
+            decode_huffman(&[0xff]),
             Err(HpackError::InvalidHuffmanPadding)
         );
     }
@@ -582,7 +545,7 @@ mod test {
     #[test]
     fn eos_in_the_data_is_rejected() {
         assert_eq!(
-            decode_huffman_btree(&[0xff, 0xff, 0xff, 0xff]),
+            decode_huffman(&[0xff, 0xff, 0xff, 0xff]),
             Err(HpackError::HuffmanEos)
         );
     }
@@ -721,6 +684,6 @@ mod test {
         // EOS (30 ones) + 'a' (00011) = 35 bits, then 5 bits of padding.
         let input = [0xff, 0xff, 0xff, 0xfc, 0x7f];
 
-        assert_eq!(decode_huffman_btree(&input), Err(HpackError::HuffmanEos));
+        assert_eq!(decode_huffman(&input), Err(HpackError::HuffmanEos));
     }
 }

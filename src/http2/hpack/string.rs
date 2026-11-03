@@ -1,4 +1,4 @@
-use crate::http2::hpack::{HpackError, huffman::decode_huffman_btree, integer::decode_integer};
+use crate::http2::hpack::{HpackError, huffman::decode_huffman, integer::decode_integer};
 
 const HUFFMAN_FLAG: u8 = 0x80;
 const LENGTH_PREFIX_BITS: u8 = 7;
@@ -34,7 +34,7 @@ pub fn decode_string(input: &[u8]) -> Result<(Vec<u8>, usize), HpackError> {
         .ok_or(HpackError::InvalidTruncated)?;
 
     if huffman {
-        let value = decode_huffman_btree(data)?;
+        let value = decode_huffman(data)?;
 
         return Ok((value, end));
     }
