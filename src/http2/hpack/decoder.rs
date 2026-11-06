@@ -1,11 +1,11 @@
 use crate::http2::hpack::{
-    HpackError, dynamic_table::DynamicTable, integer::decode_integer, static_table,
+    HeaderField, HpackError, dynamic_table::DynamicTable, integer::decode_integer, static_table,
     string::decode_string,
 };
 
 const STATIC_TABLE_LEN: usize = 61;
-
-enum DecoderDecision {
+const MAX_HEADER_LIST_SIZE: usize = 16_384;
+enum Representation {
     Indexed,
     LiteralIndexing,
     SizeUpdate,
@@ -17,34 +17,32 @@ enum DecoderDecision {
 // One decoder per connection: the dynamic table is shared by every block, in order.
 pub struct Decoder {
     table: DynamicTable,
+    max_list_size: usize,
 }
-
-// RFC 7541 §1.3: a header field is a (name, value) pair of raw bytes.
-pub type HeaderField = (Vec<u8>, Vec<u8>);
 
 // RFC 7541 §6: the high bits of the first byte select the representation,
 // the low bits (x) start its prefixed integer.
 // The ranges cover every u8 value, so the compiler checks nothing is missing.
-fn get_decision(byte: u8) -> DecoderDecision {
+fn get_decision(byte: u8) -> Representation {
     match byte {
         // 1xxx xxxx: 1000_0000..=1111_1111
-        0x80..=0xFF => DecoderDecision::Indexed,
+        0x80..=0xFF => Representation::Indexed,
         // 01xx xxxx: 0100_0000..=0111_1111
-        0x40..=0x7F => DecoderDecision::LiteralIndexing,
+        0x40..=0x7F => Representation::LiteralIndexing,
         // 001x xxxx: 0010_0000..=0011_1111
-        0x20..=0x3F => DecoderDecision::SizeUpdate,
+        0x20..=0x3F => Representation::SizeUpdate,
         // 0001 xxxx: 0001_0000..=0001_1111
-        0x10..=0x1F => DecoderDecision::NeverIndexed,
+        0x10..=0x1F => Representation::NeverIndexed,
         // 0000 xxxx: 0000_0000..=0000_1111
-        0x00..=0x0F => DecoderDecision::NoIndexing,
+        0x00..=0x0F => Representation::NoIndexing,
     }
 }
 
 impl Decoder {
-    // `limit` is the SETTINGS_HEADER_TABLE_SIZE we announced (4_096 by default).
-    pub fn new(limit: usize) -> Self {
+    pub fn new(limit: usize, max_list_size: usize) -> Self {
         Self {
             table: DynamicTable::new(limit),
+            max_list_size,
         }
     }
 
@@ -53,19 +51,31 @@ impl Decoder {
             let (name, value) = static_table::get(index_id)?;
             Ok((name.as_bytes().to_vec(), value.as_bytes().to_vec()))
         } else {
-            let index = index_id
-                .checked_sub(STATIC_TABLE_LEN)
-                .ok_or(HpackError::InvalidIndex)?;
+            let index = index_id - STATIC_TABLE_LEN;
             let (name, value) = self.table.get(index)?;
             Ok((name.to_vec(), value.to_vec()))
         }
+    }
+
+    fn push(
+        &self,
+        list: &mut Vec<HeaderField>,
+        list_size: &mut usize,
+        field: HeaderField,
+    ) -> Result<(), HpackError> {
+        *list_size += field.0.len() + field.1.len() + 32;
+        if *list_size > self.max_list_size {
+            return Err(HpackError::HeaderListTooLarge);
+        }
+        list.push(field);
+        Ok(())
     }
 
     fn read_literal(
         &self,
         block: &[u8],
         prefix_bits: u8,
-    ) -> Result<(Vec<u8>, Vec<u8>, usize), HpackError> {
+    ) -> Result<(HeaderField, usize), HpackError> {
         let mut cursor = 0;
         let (index_id, consumed) = decode_integer(block, prefix_bits)?;
         cursor += consumed;
@@ -79,7 +89,7 @@ impl Decoder {
         let (value, consumed) = decode_string(&block[(cursor)..])?;
         cursor += consumed;
 
-        Ok((name, value, cursor))
+        Ok(((name, value), cursor))
     }
 
     // Decodes one complete header block: the HEADERS payload, plus any
@@ -88,17 +98,18 @@ impl Decoder {
         let mut cursor = 0;
 
         let mut list = vec![];
+        let mut list_size = 0usize;
         while cursor < block.len() {
             let byte = block[cursor];
 
             match get_decision(byte) {
-                DecoderDecision::LiteralIndexing => {
-                    let (name, value, consumed) = self.read_literal(&block[cursor..], 6)?;
+                Representation::LiteralIndexing => {
+                    let ((name, value), consumed) = self.read_literal(&block[cursor..], 6)?;
                     cursor += consumed;
-                    list.push((name.clone(), value.clone()));
+                    self.push(&mut list, &mut list_size, (name.clone(), value.clone()))?;
                     self.table.insert(name, value);
                 }
-                DecoderDecision::SizeUpdate => {
+                Representation::SizeUpdate => {
                     if !list.is_empty() {
                         return Err(HpackError::UnexpectedTableSizeUpdate);
                     }
@@ -106,15 +117,15 @@ impl Decoder {
                     cursor += consumed;
                     self.table.set_max_size(value)?;
                 }
-                DecoderDecision::Indexed => {
+                Representation::Indexed => {
                     let (index_id, consumed) = decode_integer(&block[cursor..], 7)?;
                     cursor += consumed;
-                    list.push(self.resolve(index_id)?);
+                    self.push(&mut list, &mut list_size, self.resolve(index_id)?)?;
                 }
-                DecoderDecision::NoIndexing | DecoderDecision::NeverIndexed => {
-                    let (name, value, consumed) = self.read_literal(&block[cursor..], 4)?;
+                Representation::NoIndexing | Representation::NeverIndexed => {
+                    let ((name, value), consumed) = self.read_literal(&block[cursor..], 4)?;
                     cursor += consumed;
-                    list.push((name, value));
+                    self.push(&mut list, &mut list_size, (name, value))?;
                 }
             }
         }
@@ -147,7 +158,10 @@ mod test {
     }
 
     fn decode(block: &[u8]) -> Result<Vec<(String, String)>, HpackError> {
-        decode_with(&mut Decoder::new(DEFAULT_LIMIT), block)
+        decode_with(
+            &mut Decoder::new(DEFAULT_LIMIT, MAX_HEADER_LIST_SIZE),
+            block,
+        )
     }
 
     fn pairs(expected: &[(&str, &str)]) -> Vec<(String, String)> {
@@ -295,7 +309,7 @@ mod test {
     #[test]
     fn literal_with_indexing_is_added_to_the_table() {
         let block = [&[0x40, 0x0a][..], b"custom-key", &[0x0d], b"custom-header"].concat();
-        let mut decoder = Decoder::new(DEFAULT_LIMIT);
+        let mut decoder = Decoder::new(DEFAULT_LIMIT, MAX_HEADER_LIST_SIZE);
 
         assert_eq!(
             decode_with(&mut decoder, &block),
@@ -308,7 +322,7 @@ mod test {
     #[test]
     fn literal_without_indexing_is_not_added_to_the_table() {
         let block = [&[0x04, 0x0c][..], b"/sample/path"].concat();
-        let mut decoder = Decoder::new(DEFAULT_LIMIT);
+        let mut decoder = Decoder::new(DEFAULT_LIMIT, MAX_HEADER_LIST_SIZE);
         decoder.decode(&block).unwrap();
 
         assert_eq!(decoder.table.len(), 0);
@@ -317,7 +331,7 @@ mod test {
     #[test]
     fn literal_never_indexed_is_not_added_to_the_table() {
         let block = [&[0x10, 0x08][..], b"password", &[0x06], b"secret"].concat();
-        let mut decoder = Decoder::new(DEFAULT_LIMIT);
+        let mut decoder = Decoder::new(DEFAULT_LIMIT, MAX_HEADER_LIST_SIZE);
         decoder.decode(&block).unwrap();
 
         assert_eq!(decoder.table.len(), 0);
@@ -344,7 +358,7 @@ mod test {
 
     #[test]
     fn c_3_1_first_request() {
-        let mut decoder = Decoder::new(DEFAULT_LIMIT);
+        let mut decoder = Decoder::new(DEFAULT_LIMIT, MAX_HEADER_LIST_SIZE);
 
         assert_eq!(
             decode_with(&mut decoder, C_3_1),
@@ -361,7 +375,7 @@ mod test {
     // 0xbe = index 62: :authority, learned from the first request.
     #[test]
     fn c_3_2_reuses_the_first_request() {
-        let mut decoder = Decoder::new(DEFAULT_LIMIT);
+        let mut decoder = Decoder::new(DEFAULT_LIMIT, MAX_HEADER_LIST_SIZE);
         decoder.decode(C_3_1).unwrap();
 
         assert_eq!(
@@ -380,7 +394,7 @@ mod test {
     // 0xbf = index 63: :authority has shifted up since cache-control was added.
     #[test]
     fn c_3_3_indices_shift_as_entries_are_added() {
-        let mut decoder = Decoder::new(DEFAULT_LIMIT);
+        let mut decoder = Decoder::new(DEFAULT_LIMIT, MAX_HEADER_LIST_SIZE);
         decoder.decode(C_3_1).unwrap();
         decoder.decode(C_3_2).unwrap();
 
@@ -400,7 +414,7 @@ mod test {
     // 0x7e = literal with indexing, name index 62 (:authority from C.3.1).
     #[test]
     fn literal_name_from_the_dynamic_table() {
-        let mut decoder = Decoder::new(DEFAULT_LIMIT);
+        let mut decoder = Decoder::new(DEFAULT_LIMIT, MAX_HEADER_LIST_SIZE);
         decoder.decode(C_3_1).unwrap();
         let block = [&[0x7e, 0x03][..], b"foo"].concat();
 
@@ -424,7 +438,7 @@ mod test {
 
     #[test]
     fn size_update_to_0_empties_the_table() {
-        let mut decoder = Decoder::new(DEFAULT_LIMIT);
+        let mut decoder = Decoder::new(DEFAULT_LIMIT, MAX_HEADER_LIST_SIZE);
         decoder.decode(C_3_1).unwrap();
         decoder.decode(&[0x20]).unwrap();
 
@@ -443,7 +457,7 @@ mod test {
     // "Start" means the start of each block, not of the connection.
     #[test]
     fn size_update_at_the_start_of_a_later_block() {
-        let mut decoder = Decoder::new(DEFAULT_LIMIT);
+        let mut decoder = Decoder::new(DEFAULT_LIMIT, MAX_HEADER_LIST_SIZE);
         decoder.decode(&[0x82]).unwrap();
 
         assert_eq!(
@@ -487,7 +501,7 @@ mod test {
     // The table stores decoded values: same sizes as C.3.
     #[test]
     fn c_4_huffman_requests() {
-        let mut decoder = Decoder::new(DEFAULT_LIMIT);
+        let mut decoder = Decoder::new(DEFAULT_LIMIT, MAX_HEADER_LIST_SIZE);
 
         assert_eq!(
             decode_with(&mut decoder, &hex(C_4_1)),
@@ -537,7 +551,7 @@ mod test {
     // SETTINGS_HEADER_TABLE_SIZE = 256: each response evicts older entries.
     #[test]
     fn c_6_huffman_responses_with_evictions() {
-        let mut decoder = Decoder::new(256);
+        let mut decoder = Decoder::new(256, MAX_HEADER_LIST_SIZE);
 
         assert_eq!(
             decode_with(&mut decoder, &hex(C_6_1)),
@@ -578,5 +592,97 @@ mod test {
         );
         assert_eq!(decoder.table.size(), 215);
         assert_eq!(decoder.table.len(), 3);
+    }
+
+    // --- Header list size (RFC 9113 §6.5.2, SETTINGS_MAX_HEADER_LIST_SIZE) ---
+
+    fn decode_limited(max_list_size: usize, block: &[u8]) -> Result<Vec<HeaderField>, HpackError> {
+        Decoder::new(DEFAULT_LIMIT, max_list_size).decode(block)
+    }
+
+    // ":method: GET" = 7 + 3 + 32 = 42: the same overhead as a table entry.
+    // The limit itself is allowed, one byte less is not.
+    #[test]
+    fn field_size_counts_the_32_byte_overhead() {
+        assert!(decode_limited(42, &[0x82]).is_ok());
+        assert_eq!(
+            decode_limited(41, &[0x82]),
+            Err(HpackError::HeaderListTooLarge)
+        );
+    }
+
+    // The limit applies to the sum of the fields, not to each one.
+    #[test]
+    fn limit_applies_to_the_whole_list() {
+        assert!(decode_limited(84, &[0x82, 0x82]).is_ok());
+        assert_eq!(
+            decode_limited(84, &[0x82, 0x82, 0x82]),
+            Err(HpackError::HeaderListTooLarge)
+        );
+    }
+
+    // Each representation is counted: "foo: bar" = 3 + 3 + 32 = 38.
+    #[test]
+    fn literal_fields_are_counted() {
+        let without_indexing = [&[0x00, 0x03][..], b"foo", &[0x03], b"bar"].concat();
+        let never_indexed = [&[0x10, 0x03][..], b"foo", &[0x03], b"bar"].concat();
+        let with_indexing = [&[0x40, 0x03][..], b"foo", &[0x03], b"bar"].concat();
+
+        for block in [without_indexing, never_indexed, with_indexing] {
+            assert!(decode_limited(38, &block).is_ok());
+            assert_eq!(
+                decode_limited(37, &block),
+                Err(HpackError::HeaderListTooLarge)
+            );
+        }
+    }
+
+    // The size is the decoded one: ":authority: www.example.com" is 10 + 15 + 32 = 57,
+    // even though the Huffman value takes only 12 bytes on the wire.
+    #[test]
+    fn huffman_fields_count_their_decoded_size() {
+        let block = hex("418c f1e3 c2e5 f23a 6ba0 ab90 f4ff");
+
+        assert!(decode_limited(57, &block).is_ok());
+        assert_eq!(
+            decode_limited(56, &block),
+            Err(HpackError::HeaderListTooLarge)
+        );
+    }
+
+    // A size update produces no field: it costs nothing.
+    // 0x3f e1 1f = size update to 4_096 (31 + 97 + 31 * 128).
+    #[test]
+    fn size_updates_are_not_counted() {
+        assert!(decode_limited(42, &[0x3f, 0xe1, 0x1f, 0x82]).is_ok());
+    }
+
+    // The limit is per header block: the count starts over at each decode.
+    #[test]
+    fn count_starts_over_for_each_block() {
+        let mut decoder = Decoder::new(DEFAULT_LIMIT, 84);
+
+        assert!(decoder.decode(&[0x82, 0x82]).is_ok());
+        assert!(decoder.decode(&[0x82, 0x82]).is_ok());
+    }
+
+    // The HPACK bomb: one ~4 KB entry in the dynamic table, then a block of
+    // 1-byte references to it (0xbe = index 62). Without a limit, 1_000 bytes
+    // on the wire would decode to ~4 MB.
+    #[test]
+    fn hpack_bomb_is_rejected() {
+        let mut decoder = Decoder::new(DEFAULT_LIMIT, MAX_HEADER_LIST_SIZE);
+
+        // Literal with indexing, name "x", value of 4_000 bytes:
+        // length 4_000 = 127 + 33 + 30 * 128 → 0x7f 0xa1 0x1e.
+        let mut insert = vec![0x40, 0x01, b'x', 0x7f, 0xa1, 0x1e];
+        insert.extend_from_slice(&[b'a'; 4_000]);
+        assert!(decoder.decode(&insert).is_ok());
+        assert_eq!(decoder.table.size(), 1 + 4_000 + 32);
+
+        assert_eq!(
+            decoder.decode(&[0xbe; 1_000]),
+            Err(HpackError::HeaderListTooLarge)
+        );
     }
 }

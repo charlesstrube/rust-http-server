@@ -5,11 +5,11 @@ use crate::http2::hpack::HpackError;
 pub const SETTINGS_HEADER_TABLE_SIZE: usize = 4096;
 
 // RFC 7541 §2.3.2 and §4: the per-connection table of recently seen headers.
-// The fields are yours to choose.
 pub struct DynamicTable {
-    value: VecDeque<(Vec<u8>, Vec<u8>)>,
+    entries: VecDeque<(Vec<u8>, Vec<u8>)>,
     max_size: usize,
     limit: usize,
+    size: usize,
 }
 
 fn get_size(name: &[u8], value: &[u8]) -> usize {
@@ -21,9 +21,10 @@ impl DynamicTable {
     // starts there, and a size update can never go above it.
     pub fn new(limit: usize) -> Self {
         Self {
-            value: VecDeque::new(),
+            entries: VecDeque::new(),
             max_size: limit,
             limit,
+            size: 0,
         }
     }
 
@@ -33,7 +34,10 @@ impl DynamicTable {
             return Err(HpackError::InvalidIndex);
         }
 
-        let (name, value) = &self.value.get(index - 1).ok_or(HpackError::InvalidIndex)?;
+        let (name, value) = &self
+            .entries
+            .get(index - 1)
+            .ok_or(HpackError::InvalidIndex)?;
         Ok((name.as_slice(), value.as_slice()))
     }
 
@@ -41,13 +45,17 @@ impl DynamicTable {
     pub fn insert(&mut self, name: Vec<u8>, value: Vec<u8>) {
         let header_size = get_size(&name, &value);
 
-        while self.size() + header_size > self.max_size {
-            if self.value.pop_back().is_none() {
+        while self.size + header_size > self.max_size {
+            let result = self.entries.pop_back();
+            if let Some((removed_name, removed_balue)) = result {
+                self.size -= get_size(&removed_name, &removed_balue);
+            } else {
                 return;
             }
         }
 
-        self.value.push_front((name, value));
+        self.entries.push_front((name, value));
+        self.size += header_size;
     }
 
     // RFC 7541 §6.3: dynamic table size update sent by the peer.
@@ -57,11 +65,12 @@ impl DynamicTable {
         }
 
         let mut size = 0usize;
-        for (index, (name, value)) in self.value.iter().enumerate() {
+        for (index, (name, value)) in self.entries.iter().enumerate() {
             size += name.len() + value.len() + 32usize;
 
             if size > max_size {
-                self.value.drain(index..self.value.len());
+                self.entries.drain(index..self.entries.len());
+                self.udpate_size();
                 break;
             }
         }
@@ -73,16 +82,21 @@ impl DynamicTable {
 
     // Sum of the entry sizes (name + value + 32 each).
     pub fn size(&self) -> usize {
+        self.size
+    }
+
+    // Sum of the entry sizes (name + value + 32 each).
+    pub fn udpate_size(&mut self) {
         let mut size = 0usize;
-        for (name, value) in self.value.iter() {
+        for (name, value) in self.entries.iter() {
             size += get_size(name, value);
         }
 
-        size
+        self.size = size;
     }
 
     pub fn len(&self) -> usize {
-        self.value.len()
+        self.entries.len()
     }
 }
 

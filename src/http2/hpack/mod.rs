@@ -1,9 +1,13 @@
 pub mod decoder;
 pub mod dynamic_table;
+pub mod encoder;
 pub mod huffman;
 pub mod integer;
 pub mod static_table;
 pub mod string;
+
+// RFC 7541 §1.3: a header field is a (name, value) pair of raw bytes.
+pub type HeaderField = (Vec<u8>, Vec<u8>);
 
 // RFC 9113 §4.3: any HPACK decoding error is a connection error (COMPRESSION_ERROR).
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -19,6 +23,8 @@ pub enum HpackError {
     // RFC 7541 §4.2: a size update is only allowed at the start of a header block.
     #[error("Table size update after a header field")]
     UnexpectedTableSizeUpdate,
+    #[error("Header list to large")]
+    HeaderListTooLarge,
     // RFC 7541 §5.2: padding is at most 7 bits, all set to 1.
     #[error("Invalid Huffman padding")]
     InvalidHuffmanPadding,

@@ -1,4 +1,4 @@
-# Rust HTTP/1.1 and HTTP/2 protocal trainging
+# Rust HTTP/1.1 and HTTP/2 protocol training
 
 HTTP/1.1 works
 

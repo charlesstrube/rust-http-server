@@ -276,7 +276,7 @@ struct Node {
 
 fn build_btree() -> Vec<Node> {
     let mut tree = vec![Node::default()];
-    for (code_index, (code, length)) in CODES.iter().enumerate() {
+    for (symbol, (code, length)) in CODES.iter().enumerate() {
         let mut current_index = 0;
         for index in (0..*length).rev() {
             let bit = (code >> index) & 1;
@@ -288,10 +288,8 @@ fn build_btree() -> Vec<Node> {
                     tree[current_index].children[children_index] = Some(tree.len());
                     current_index = tree.len();
                     if index == 0 {
-                        node.symbol = Some(code_index as u16);
-                        current_index = 0;
+                        node.symbol = Some(symbol as u16);
                     }
-
                     tree.push(node);
                 }
             }
@@ -326,8 +324,7 @@ pub fn decode_huffman(input: &[u8]) -> Result<Vec<u8>, HpackError> {
             }
 
             let node_index = TREE[current_index].children[bit as usize].expect("complete code");
-            if TREE[node_index].symbol.is_some() {
-                let symbol = TREE[node_index].symbol.expect("complete code");
+            if let Some(symbol) = TREE[node_index].symbol {
                 symbols.push(u8::try_from(symbol).map_err(|_| HpackError::HuffmanEos)?);
                 current_index = 0;
                 nbits = 0;

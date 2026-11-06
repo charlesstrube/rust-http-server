@@ -1,4 +1,8 @@
-use crate::http2::hpack::{HpackError, huffman::decode_huffman, integer::decode_integer};
+use crate::http2::hpack::{
+    HpackError,
+    huffman::decode_huffman,
+    integer::{decode_integer, encode_integer},
+};
 
 const HUFFMAN_FLAG: u8 = 0x80;
 const LENGTH_PREFIX_BITS: u8 = 7;
@@ -22,7 +26,7 @@ const LENGTH_PREFIX_BITS: u8 = 7;
 pub fn decode_string(input: &[u8]) -> Result<(Vec<u8>, usize), HpackError> {
     let first = input.first().ok_or(HpackError::InvalidTruncated)?;
 
-    // if the first bytes is 1, then it's not supported
+    // if the first bytes is 1, huffman is on
     let huffman = first & HUFFMAN_FLAG != 0;
 
     let (string_length, consumed) = decode_integer(input, LENGTH_PREFIX_BITS)?;
@@ -40,6 +44,13 @@ pub fn decode_string(input: &[u8]) -> Result<(Vec<u8>, usize), HpackError> {
     }
 
     Ok((data.to_vec(), end))
+}
+
+// RFC 7541 §5.2: appends `data` to `out` as a raw string literal (H = 0, no Huffman).
+pub fn encode_string(data: &[u8], out: &mut Vec<u8>) {
+    encode_integer(data.len(), 7, 0, out);
+
+    out.extend_from_slice(data);
 }
 
 #[cfg(test)]
@@ -191,5 +202,79 @@ mod test {
         input.push(0x01);
 
         assert_eq!(decode_string(&input), Err(HpackError::InvalidOverflow));
+    }
+
+    // --- Encoding (step 5.2) ---
+
+    fn encoded(data: &[u8]) -> Vec<u8> {
+        let mut out = vec![];
+        encode_string(data, &mut out);
+        out
+    }
+
+    // C.2.1: 0x0a = H 0 + length 10, then the raw bytes.
+    #[test]
+    fn encodes_the_name_of_c_2_1() {
+        assert_eq!(encoded(b"custom-key"), literal(b"custom-key"));
+    }
+
+    #[test]
+    fn encodes_an_empty_string() {
+        assert_eq!(encoded(b""), vec![0x00]);
+    }
+
+    // 127 does not fit in the 7-bit prefix: 0x7f then a 0x00 continuation byte.
+    #[test]
+    fn encodes_a_127_byte_string() {
+        let mut expected = vec![0b0111_1111, 0];
+        expected.extend_from_slice(&[b'a'; 127]);
+
+        assert_eq!(encoded(&[b'a'; 127]), expected);
+    }
+
+    // The mirror of decodes_a_length_with_a_continuation_byte.
+    #[test]
+    fn encodes_a_length_with_a_continuation_byte() {
+        let mut expected = vec![0b0111_1111, 73];
+        expected.extend_from_slice(&[b'a'; 200]);
+
+        assert_eq!(encoded(&[b'a'; 200]), expected);
+    }
+
+    // The H bit must stay 0 even when the length overflows its prefix.
+    #[test]
+    fn never_sets_the_huffman_bit() {
+        for len in [0, 1, 126, 127, 128, 1_000] {
+            let bytes = encoded(&vec![b'x'; len]);
+
+            assert_eq!(bytes[0] & HUFFMAN_FLAG, 0, "length {len}");
+        }
+    }
+
+    #[test]
+    fn keeps_non_utf8_bytes_when_encoding() {
+        assert_eq!(encoded(&[0xff, 0xfe]), vec![0x02, 0xff, 0xfe]);
+    }
+
+    #[test]
+    fn appends_to_the_output() {
+        let mut out = vec![0x00];
+        encode_string(b"ab", &mut out);
+
+        assert_eq!(out, vec![0x00, 0x02, b'a', b'b']);
+    }
+
+    #[test]
+    fn round_trips_through_decode_string() {
+        for len in [0, 1, 10, 126, 127, 128, 300, 16_384] {
+            let data: Vec<u8> = (0..len).map(|i| (i % 256) as u8).collect();
+            let bytes = encoded(&data);
+
+            assert_eq!(
+                decode_string(&bytes),
+                Ok((data, bytes.len())),
+                "length {len}"
+            );
+        }
     }
 }

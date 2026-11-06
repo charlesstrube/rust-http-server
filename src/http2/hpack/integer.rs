@@ -66,6 +66,31 @@ pub fn decode_integer(input: &[u8], prefix_bits: u8) -> Result<(usize, usize), H
     Err(HpackError::InvalidTruncated)
 }
 
+// RFC 7541 §5.1: appends `value` to `out` with a `prefix_bits` prefix (1..=8).
+// `flags` holds the representation bits above the prefix (e.g. 0x80 for indexed).
+pub fn encode_integer(value: usize, prefix_bits: u8, flags: u8, out: &mut Vec<u8>) {
+    let mask = u8::MAX >> (8 - prefix_bits);
+    if value < usize::from(mask) {
+        let test = flags | value as u8;
+        out.push(test);
+    } else {
+        let mut rest = value - usize::from(mask);
+        out.push(flags | mask);
+        while rest >= 128 {
+            let current = rest & 0x7F;
+            let mut byte = current as u8;
+            byte = byte | 0x80;
+            rest >>= 7;
+            out.push(byte);
+        }
+
+        // after the loop, push the rest
+        out.push(rest as u8);
+    }
+
+    // todo!("step 5.1")
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -198,5 +223,108 @@ mod test {
         let input = [0b0001_1111, 0x80, 0x80, 0x80, 0x80, 0x80, 0b0000_0001];
 
         assert_eq!(decode_integer(&input, 5), Err(HpackError::InvalidOverflow));
+    }
+
+    // --- Encoding (step 5.1) ---
+
+    fn encoded(value: usize, prefix_bits: u8, flags: u8) -> Vec<u8> {
+        let mut out = vec![];
+        encode_integer(value, prefix_bits, flags, &mut out);
+        out
+    }
+
+    // C.1.1
+    #[test]
+    fn encodes_10_with_a_5_bit_prefix() {
+        assert_eq!(encoded(10, 5, 0), vec![0b0000_1010]);
+    }
+
+    // C.1.2: 1337 - 31 = 1306 = 10 * 128 + 26, least significant group first.
+    #[test]
+    fn encodes_1337_with_a_5_bit_prefix() {
+        assert_eq!(
+            encoded(1337, 5, 0),
+            vec![0b0001_1111, 0b1001_1010, 0b0000_1010]
+        );
+    }
+
+    // C.1.3
+    #[test]
+    fn encodes_42_with_an_8_bit_prefix() {
+        assert_eq!(encoded(42, 8, 0), vec![0b0010_1010]);
+    }
+
+    #[test]
+    fn encodes_zero() {
+        assert_eq!(encoded(0, 7, 0), vec![0x00]);
+    }
+
+    #[test]
+    fn encodes_the_largest_value_that_fits_in_the_prefix() {
+        assert_eq!(encoded(30, 5, 0), vec![0b0001_1110]);
+    }
+
+    // The trap: 2^N - 1 does not fit, a prefix full of ones always announces
+    // a continuation, so a 0x00 byte must follow.
+    #[test]
+    fn value_equal_to_the_full_prefix_needs_a_zero_continuation_byte() {
+        assert_eq!(encoded(31, 5, 0), vec![0b0001_1111, 0b0000_0000]);
+        assert_eq!(encoded(127, 7, 0), vec![0b0111_1111, 0b0000_0000]);
+        assert_eq!(encoded(255, 8, 0), vec![0b1111_1111, 0b0000_0000]);
+    }
+
+    #[test]
+    fn encodes_128_with_a_7_bit_prefix() {
+        assert_eq!(encoded(128, 7, 0), vec![0b0111_1111, 0b0000_0001]);
+    }
+
+    // 127 + 128 = 255: the remainder (128) needs two 7-bit groups.
+    #[test]
+    fn encodes_a_remainder_on_two_continuation_bytes() {
+        assert_eq!(
+            encoded(255, 7, 0),
+            vec![0b0111_1111, 0b1000_0000, 0b0000_0001]
+        );
+    }
+
+    // The flags only touch the bits above the prefix, on the first byte only.
+    #[test]
+    fn keeps_the_flags_above_the_prefix() {
+        assert_eq!(encoded(10, 5, 0b1110_0000), vec![0b1110_1010]);
+        assert_eq!(
+            encoded(1337, 5, 0b1110_0000),
+            vec![0b1111_1111, 0b1001_1010, 0b0000_1010]
+        );
+    }
+
+    // C.2.4: indexed field 2 (:method GET) = flag 0x80 + 7-bit prefix.
+    #[test]
+    fn encodes_an_indexed_field_byte() {
+        assert_eq!(encoded(2, 7, 0x80), vec![0x82]);
+    }
+
+    // Appends: what is already in `out` stays in front.
+    #[test]
+    fn appends_to_the_output() {
+        let mut out = vec![0xAA];
+        encode_integer(10, 5, 0, &mut out);
+
+        assert_eq!(out, vec![0xAA, 0b0000_1010]);
+    }
+
+    // Whatever the encoder writes, the decoder of step 4 must read back.
+    #[test]
+    fn round_trips_through_decode_integer() {
+        for prefix_bits in 1..=8 {
+            for value in (0..2_000).chain([16_383, 16_384, 65_535, 1 << 20]) {
+                let bytes = encoded(value, prefix_bits, 0);
+
+                assert_eq!(
+                    decode_integer(&bytes, prefix_bits),
+                    Ok((value, bytes.len())),
+                    "value {value} with a {prefix_bits}-bit prefix"
+                );
+            }
+        }
     }
 }
