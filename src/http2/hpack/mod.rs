@@ -3,6 +3,7 @@ pub mod dynamic_table;
 pub mod encoder;
 pub mod huffman;
 pub mod integer;
+mod representation;
 pub mod static_table;
 pub mod string;
 

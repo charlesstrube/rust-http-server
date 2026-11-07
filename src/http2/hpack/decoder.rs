@@ -1,41 +1,15 @@
 use crate::http2::hpack::{
-    HeaderField, HpackError, dynamic_table::DynamicTable, integer::decode_integer, static_table,
-    string::decode_string,
+    HeaderField, HpackError, dynamic_table::DynamicTable, integer::decode_integer,
+    representation::Representation, static_table, string::decode_string,
 };
 
 const STATIC_TABLE_LEN: usize = 61;
 const MAX_HEADER_LIST_SIZE: usize = 16_384;
-enum Representation {
-    Indexed,
-    LiteralIndexing,
-    SizeUpdate,
-    NeverIndexed,
-    NoIndexing,
-}
-
 // RFC 7541 §3 and §6: turns header blocks into (name, value) pairs.
 // One decoder per connection: the dynamic table is shared by every block, in order.
 pub struct Decoder {
     table: DynamicTable,
     max_list_size: usize,
-}
-
-// RFC 7541 §6: the high bits of the first byte select the representation,
-// the low bits (x) start its prefixed integer.
-// The ranges cover every u8 value, so the compiler checks nothing is missing.
-fn get_decision(byte: u8) -> Representation {
-    match byte {
-        // 1xxx xxxx: 1000_0000..=1111_1111
-        0x80..=0xFF => Representation::Indexed,
-        // 01xx xxxx: 0100_0000..=0111_1111
-        0x40..=0x7F => Representation::LiteralIndexing,
-        // 001x xxxx: 0010_0000..=0011_1111
-        0x20..=0x3F => Representation::SizeUpdate,
-        // 0001 xxxx: 0001_0000..=0001_1111
-        0x10..=0x1F => Representation::NeverIndexed,
-        // 0000 xxxx: 0000_0000..=0000_1111
-        0x00..=0x0F => Representation::NoIndexing,
-    }
 }
 
 impl Decoder {
@@ -100,11 +74,13 @@ impl Decoder {
         let mut list = vec![];
         let mut list_size = 0usize;
         while cursor < block.len() {
-            let byte = block[cursor];
+            let representation = Representation::from_byte(block[cursor]);
+            let prefix_bits = representation.prefix_bits();
 
-            match get_decision(byte) {
+            match representation {
                 Representation::LiteralIndexing => {
-                    let ((name, value), consumed) = self.read_literal(&block[cursor..], 6)?;
+                    let ((name, value), consumed) =
+                        self.read_literal(&block[cursor..], prefix_bits)?;
                     cursor += consumed;
                     self.push(&mut list, &mut list_size, (name.clone(), value.clone()))?;
                     self.table.insert(name, value);
@@ -113,17 +89,18 @@ impl Decoder {
                     if !list.is_empty() {
                         return Err(HpackError::UnexpectedTableSizeUpdate);
                     }
-                    let (value, consumed) = decode_integer(&block[cursor..], 5)?;
+                    let (value, consumed) = decode_integer(&block[cursor..], prefix_bits)?;
                     cursor += consumed;
                     self.table.set_max_size(value)?;
                 }
                 Representation::Indexed => {
-                    let (index_id, consumed) = decode_integer(&block[cursor..], 7)?;
+                    let (index_id, consumed) = decode_integer(&block[cursor..], prefix_bits)?;
                     cursor += consumed;
                     self.push(&mut list, &mut list_size, self.resolve(index_id)?)?;
                 }
                 Representation::NoIndexing | Representation::NeverIndexed => {
-                    let ((name, value), consumed) = self.read_literal(&block[cursor..], 4)?;
+                    let ((name, value), consumed) =
+                        self.read_literal(&block[cursor..], prefix_bits)?;
                     cursor += consumed;
                     self.push(&mut list, &mut list_size, (name, value))?;
                 }

@@ -1,3 +1,7 @@
+use crate::http2::hpack::{
+    integer::encode_integer, representation::Representation, string::encode_string,
+};
+
 // RFC 7541 §6.2.2: the minimal encoder only emits "literal header field
 // without indexing, new name", one per field:
 //
@@ -7,7 +11,22 @@
 // It never touches the dynamic table, so it has no state and cannot desync the peer.
 // Names are encoded as given: lowercasing them is the HTTP/2 codec's job (RFC 9113 §8.2.1).
 pub fn encode(fields: &[(&str, &str)]) -> Vec<u8> {
-    todo!("step 5.3")
+    let mut result = vec![];
+    let representation = Representation::NoIndexing;
+
+    for (name, value) in fields {
+        // Index 0: the name follows as a literal instead of pointing into a table.
+        encode_integer(
+            0,
+            representation.prefix_bits(),
+            representation.flags(),
+            &mut result,
+        );
+        encode_string(name.as_bytes(), &mut result);
+        encode_string(value.as_bytes(), &mut result);
+    }
+
+    result
 }
 
 #[cfg(test)]
