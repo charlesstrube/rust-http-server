@@ -33,7 +33,7 @@ impl Request {
         path: &str,
         method: &str,
         headers: Headers,
-        body: &str,
+        body: Vec<u8>,
     ) -> Result<Self, RequestError> {
         let Ok(parsed_method) = Method::try_from(method) else {
             return Err(RequestError::InvalidMethod);
@@ -43,12 +43,12 @@ impl Request {
             path: path.into(),
             method: parsed_method,
             headers,
-            body: body.into(),
+            body,
         })
     }
 
-    pub fn set_body(&mut self, body: &[u8]) {
-        self.body = body.into();
+    pub fn set_body(&mut self, body: Vec<u8>) {
+        self.body = body;
     }
 
     pub fn accept_encoding(&self) -> Option<Vec<Encoding>> {
@@ -103,36 +103,36 @@ mod test {
             "/",
             "GET",
             Headers::from(vec![(name.into(), value.into())]),
-            "",
+            vec![],
         )
         .unwrap()
     }
 
     fn bare() -> Request {
-        Request::new("/", "GET", Headers::default(), "").unwrap()
+        Request::new("/", "GET", Headers::default(), vec![]).unwrap()
     }
 
     #[test]
     fn new_builds_request() {
-        let request = Request::new("/echo/abc", "GET", Headers::default(), "").unwrap();
+        let request = Request::new("/echo/abc", "GET", Headers::default(), vec![]).unwrap();
         assert_eq!(request.path(), "/echo/abc");
     }
 
     #[test]
     fn new_rejects_unknown_method() {
-        let result = Request::new("/", "DELETE", Headers::default(), "");
+        let result = Request::new("/", "DELETE", Headers::default(), vec![]);
         assert_eq!(result.err(), Some(RequestError::InvalidMethod));
     }
 
     #[test]
     fn new_has_no_headers() {
-        let request = Request::new("/", "GET", Headers::default(), "").unwrap();
+        let request = Request::new("/", "GET", Headers::default(), vec![]).unwrap();
         assert_eq!(request.header("Host"), None);
     }
 
     #[test]
     fn new_has_empty_body() {
-        let request = Request::new("/", "POST", Headers::default(), "").unwrap();
+        let request = Request::new("/", "POST", Headers::default(), vec![]).unwrap();
         assert_eq!(request.body(), b"");
     }
 

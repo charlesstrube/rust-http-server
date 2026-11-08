@@ -50,7 +50,7 @@ pub fn read_request(reader: &mut impl BufRead) -> Result<Option<Request>, Reques
 
     let body = String::from_utf8(body).map_err(|_| RequestError::InvalidBody)?;
 
-    request.set_body(&body.into_bytes());
+    request.set_body(body.into_bytes());
 
     Ok(Some(request))
 }

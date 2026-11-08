@@ -138,13 +138,13 @@ mod test {
             "/",
             "GET",
             Headers::from(vec![(name.into(), value.into())]),
-            "",
+            vec![],
         )
         .unwrap()
     }
 
     fn bare() -> Request {
-        Request::new("/", "GET", Headers::default(), "").unwrap()
+        Request::new("/", "GET", Headers::default(), vec![]).unwrap()
     }
 
     // --- Connection (RFC 9110 §7.6.1) ---

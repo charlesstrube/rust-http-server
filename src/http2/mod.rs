@@ -9,6 +9,7 @@ use std::io::{BufRead, Write};
 use crate::{
     http::{request::Request, response::Response},
     http2::{
+        assembler::Assembler,
         connection::{Decision, handle_frame},
         frame::{Flags, Frame, FrameType, read_frame},
         settings::Settings,
@@ -50,6 +51,10 @@ pub fn serve(
         }
         _ => return, // EOF, read error, or another frame type
     };
+
+    let assembler = Assembler::new();
+
+    // println!("{:?}", assembler);
 
     while let Ok(Some(frame)) = read_frame(&mut reader, max) {
         if !react(handle_frame(frame, &mut peer_settings), &mut writer) {

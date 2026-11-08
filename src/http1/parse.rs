@@ -25,7 +25,7 @@ pub fn parse_request(head: &str) -> Result<Request, RequestError> {
         return Err(RequestError::CannotParse);
     };
 
-    Request::new(path, method, headers, body.as_str())
+    Request::new(path, method, headers, body.into_bytes())
 }
 
 pub fn parse_headers(block: &str) -> Result<Headers, ParseHeadersError> {
@@ -382,13 +382,13 @@ mod test {
             "/",
             "GET",
             Headers::from(vec![(name.into(), value.into())]),
-            "",
+            vec![],
         )
         .unwrap()
     }
 
     fn bare() -> Request {
-        Request::new("/", "GET", Headers::default(), "").unwrap()
+        Request::new("/", "GET", Headers::default(), vec![]).unwrap()
     }
 
     // --- Content-Length (RFC 9110 §8.6, RFC 9112 §6.3) ---
