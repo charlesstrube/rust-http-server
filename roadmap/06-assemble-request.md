@@ -11,4 +11,6 @@
 
 Tests: unit tests on a `Cursor`: a GET in a single HEADERS frame, a POST with two DATA frames, a header block split over CONTINUATION, padding.
 
+Detailed specs, function by function: [06-assemble-request-spec.md](06-assemble-request-spec.md)
+
 [← Roadmap](README.md)

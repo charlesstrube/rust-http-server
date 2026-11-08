@@ -15,7 +15,6 @@ pub fn encode(fields: &[(&str, &str)]) -> Vec<u8> {
     let representation = Representation::NoIndexing;
 
     for (name, value) in fields {
-        // Index 0: the name follows as a literal instead of pointing into a table.
         encode_integer(
             0,
             representation.prefix_bits(),

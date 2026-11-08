@@ -54,7 +54,7 @@ pub fn handle_connection(stream: TcpStream, config: &Config) {
         },
         Ok(None) => (),
         Err(error) => {
-            println!("error: {}", error);
+            eprintln!("error: {}", error);
         }
     };
 }
@@ -184,7 +184,7 @@ mod test {
         let request = crate::http1::read_request(&mut chained).unwrap().unwrap();
 
         assert_eq!(request.path(), "/files/a");
-        assert_eq!(request.body(), "hi");
+        assert_eq!(request.body(), b"hi");
     }
 
     // A client that connects and closes without sending anything.

@@ -7,7 +7,7 @@ pub struct Request {
     path: String,
     method: Method,
     headers: Headers,
-    body: String,
+    body: Vec<u8>,
 }
 
 #[derive(Debug, PartialEq, thiserror::Error)]
@@ -47,8 +47,8 @@ impl Request {
         })
     }
 
-    pub fn set_body(&mut self, body: String) {
-        self.body = body;
+    pub fn set_body(&mut self, body: &[u8]) {
+        self.body = body.into();
     }
 
     pub fn accept_encoding(&self) -> Option<Vec<Encoding>> {
@@ -89,7 +89,7 @@ impl Request {
         self.headers.get(key)
     }
 
-    pub fn body(&self) -> &str {
+    pub fn body(&self) -> &[u8] {
         &self.body
     }
 }
@@ -133,7 +133,7 @@ mod test {
     #[test]
     fn new_has_empty_body() {
         let request = Request::new("/", "POST", Headers::default(), "").unwrap();
-        assert_eq!(request.body(), "");
+        assert_eq!(request.body(), b"");
     }
 
     // --- Accept-Encoding ---

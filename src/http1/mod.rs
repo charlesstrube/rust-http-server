@@ -50,7 +50,7 @@ pub fn read_request(reader: &mut impl BufRead) -> Result<Option<Request>, Reques
 
     let body = String::from_utf8(body).map_err(|_| RequestError::InvalidBody)?;
 
-    request.set_body(body);
+    request.set_body(&body.into_bytes());
 
     Ok(Some(request))
 }
@@ -117,9 +117,9 @@ mod test {
         let post = read_request(&mut reader).unwrap().unwrap();
         let get = read_request(&mut reader).unwrap().unwrap();
 
-        assert_eq!(post.body(), "abc");
+        assert_eq!(post.body(), b"abc");
         assert_eq!(get.path(), "/");
-        assert_eq!(get.body(), "");
+        assert_eq!(get.body(), b"");
     }
 
     // EOF before any byte is how a persistent connection normally ends.

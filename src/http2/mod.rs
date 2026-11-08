@@ -1,3 +1,4 @@
+pub mod assembler;
 pub mod connection;
 pub mod frame;
 pub mod hpack;
@@ -18,10 +19,7 @@ pub(crate) const PREFACE: &[u8; 24] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 
 pub fn react(decision: Decision, mut writer: impl Write) -> bool {
     match decision {
-        Decision::Reply(frame) => {
-            println!("write");
-            writer.write_all(&frame.to_bytes()).is_ok()
-        }
+        Decision::Reply(frame) => writer.write_all(&frame.to_bytes()).is_ok(),
         Decision::Continue => true,
         Decision::Close => false,
     }

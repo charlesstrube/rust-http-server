@@ -112,7 +112,7 @@ impl CreatedFile {
     pub fn create(
         dir: &std::path::Path,
         file_path: &str,
-        contents: &str,
+        contents: &[u8],
     ) -> Result<CreatedFile, StaticFileError> {
         // A single non-Normal component (RootDir, ParentDir, CurDir) turns the whole result into None
         let mut segments = Path::new(file_path)
@@ -153,7 +153,7 @@ impl CreatedFile {
             .truncate(true)
             .open(target)?;
 
-        file.write_all(contents.as_bytes())?;
+        file.write_all(contents)?;
 
         Ok(CreatedFile {})
     }
@@ -444,7 +444,7 @@ mod test {
     // --- Create a file (POST {filename}) ---
 
     fn create_response(dir: &std::path::Path, path: &str, contents: &str) -> Response {
-        match CreatedFile::create(dir, path, contents) {
+        match CreatedFile::create(dir, path, contents.as_bytes()) {
             Ok(file) => file.into(),
             Err(error) => error.into(),
         }
@@ -454,7 +454,7 @@ mod test {
     fn creates_file_with_contents() {
         let dir = TempDir::new();
 
-        assert!(CreatedFile::create(dir.path(), "number", "12345").is_ok());
+        assert!(CreatedFile::create(dir.path(), "number", b"12345").is_ok());
         assert_eq!(dir.read("number"), "12345");
     }
 
@@ -489,7 +489,7 @@ mod test {
         let dir = TempDir::new();
         let contents = "line 1\r\nline 2\n\r\n\r\n  trailing spaces  \n";
 
-        CreatedFile::create(dir.path(), "raw.txt", contents).unwrap();
+        CreatedFile::create(dir.path(), "raw.txt", contents.as_bytes()).unwrap();
 
         assert_eq!(dir.read("raw.txt"), contents);
     }
@@ -510,7 +510,7 @@ mod test {
     fn create_overwrites_existing_file() {
         let dir = dir_with_foo();
 
-        CreatedFile::create(dir.path(), "foo", "new").unwrap();
+        CreatedFile::create(dir.path(), "foo", b"new").unwrap();
 
         assert_eq!(dir.read("foo"), "new");
     }
@@ -518,7 +518,7 @@ mod test {
     #[test]
     fn created_file_can_then_be_opened() {
         let dir = TempDir::new();
-        CreatedFile::create(dir.path(), "round-trip", "there and back").unwrap();
+        CreatedFile::create(dir.path(), "round-trip", b"there and back").unwrap();
 
         assert_eq!(
             response(dir.path(), "round-trip").body_as_str(),
@@ -531,7 +531,7 @@ mod test {
         let dir = TempDir::new();
         let sub = dir.mkdir("sub");
 
-        CreatedFile::create(dir.path(), "sub/nested", "deep").unwrap();
+        CreatedFile::create(dir.path(), "sub/nested", b"deep").unwrap();
 
         assert_eq!(std::fs::read_to_string(sub.join("nested")).unwrap(), "deep");
     }
@@ -550,7 +550,7 @@ mod test {
     fn create_with_empty_filename_is_an_error() {
         let dir = TempDir::new();
 
-        assert!(CreatedFile::create(dir.path(), "", "x").is_err());
+        assert!(CreatedFile::create(dir.path(), "", b"x").is_err());
     }
 
     #[test]
@@ -558,7 +558,7 @@ mod test {
         let dir = TempDir::new();
         dir.mkdir("sub");
 
-        assert!(CreatedFile::create(dir.path(), "sub", "x").is_err());
+        assert!(CreatedFile::create(dir.path(), "sub", b"x").is_err());
         assert!(dir.path().join("sub").is_dir());
     }
 
@@ -573,7 +573,7 @@ mod test {
         let public = dir.mkdir("public");
 
         assert!(matches!(
-            CreatedFile::create(&public, "../evil", "pwned"),
+            CreatedFile::create(&public, "../evil", b"pwned"),
             Err(StaticFileError::InvalidPath)
         ));
         assert!(!dir.path().join("evil").exists());
@@ -601,7 +601,7 @@ mod test {
         dir.mkdir("sub");
 
         assert!(matches!(
-            CreatedFile::create(dir.path(), "sub/../foo", "x"),
+            CreatedFile::create(dir.path(), "sub/../foo", b"x"),
             Err(StaticFileError::InvalidPath)
         ));
         assert!(!dir.path().join("foo").exists());

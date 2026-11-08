@@ -183,7 +183,7 @@ mod test {
     #[test]
     fn parses_body_after_empty_line() {
         let request = parse_request(SPEC_POST).unwrap();
-        assert_eq!(request.body(), "12345");
+        assert_eq!(request.body(), b"12345");
     }
 
     #[test]
@@ -204,7 +204,7 @@ mod test {
     fn body_is_not_parsed_as_headers() {
         let request =
             parse_request("POST /files/a HTTP/1.1\r\nContent-Length: 7\r\n\r\ngarbage").unwrap();
-        assert_eq!(request.body(), "garbage");
+        assert_eq!(request.body(), b"garbage");
     }
 
     // Only the first empty line ends the head; later CRLFs belong to the body.
@@ -213,25 +213,25 @@ mod test {
         let request =
             parse_request("POST /files/a HTTP/1.1\r\nContent-Length: 10\r\n\r\na\r\nb\r\n\r\nc")
                 .unwrap();
-        assert_eq!(request.body(), "a\r\nb\r\n\r\nc");
+        assert_eq!(request.body(), b"a\r\nb\r\n\r\nc");
     }
 
     #[test]
     fn head_without_body_has_empty_body() {
         let request = parse_request(SPEC_REQUEST).unwrap();
-        assert_eq!(request.body(), "");
+        assert_eq!(request.body(), b"");
     }
 
     #[test]
     fn request_line_only_has_empty_body() {
         let request = parse_request("GET / HTTP/1.1").unwrap();
-        assert_eq!(request.body(), "");
+        assert_eq!(request.body(), b"");
     }
 
     #[test]
     fn request_line_with_empty_line_has_empty_body() {
         let request = parse_request("GET / HTTP/1.1\r\n\r\n").unwrap();
-        assert_eq!(request.body(), "");
+        assert_eq!(request.body(), b"");
     }
 
     // --- Header section (RFC 9112 §5) ---
