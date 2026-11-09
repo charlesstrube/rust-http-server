@@ -7,6 +7,7 @@ const STATIC_TABLE_LEN: usize = 61;
 const MAX_HEADER_LIST_SIZE: usize = 16_384;
 // RFC 7541 §3 and §6: turns header blocks into (name, value) pairs.
 // One decoder per connection: the dynamic table is shared by every block, in order.
+#[derive(Default)]
 pub struct Decoder {
     table: DynamicTable,
     max_list_size: usize,

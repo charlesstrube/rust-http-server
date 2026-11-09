@@ -1,13 +1,12 @@
-use std::{
-    collections::{HashMap, hash_map::Entry},
-    str::Utf8Error,
-};
+use std::collections::{HashMap, hash_map::Entry};
 
 use crate::{
     http::{headers::Headers, request::Request},
     http2::{
         frame::{Flags, Frame, FrameType},
-        hpack::{HeaderField, HpackError, decoder::Decoder},
+        hpack::{
+            HeaderField, HpackError, decoder::Decoder, dynamic_table::SETTINGS_HEADER_TABLE_SIZE,
+        },
     },
 };
 
@@ -15,51 +14,46 @@ use crate::{
 pub enum AssembleError {
     #[error(transparent)]
     Hpack(#[from] HpackError), // connection error, COMPRESSION_ERROR
-    #[error("test")]
+    #[error("invalid stream id")]
     InvalidStreamId, // connection error, PROTOCOL_ERROR
-    #[error("test")]
+    #[error("padding or priority fields do not fit in the frame payload")]
     InvalidPadding, // connection error, PROTOCOL_ERROR
-    #[error("test")]
+    #[error("expected a CONTINUATION frame on the same stream")]
     ExpectedContinuation, // connection error, PROTOCOL_ERROR
-    #[error("test")]
+    #[error("CONTINUATION frame without an open header block")]
     UnexpectedContinuation, // connection error, PROTOCOL_ERROR
-    #[error("test")]
+    #[error("header block larger than MAX_HEADER_BLOCK_SIZE")]
     HeaderBlockTooLarge, // connection error (CONTINUATION flood)
-    #[error("test")]
+    #[error("frame received on a closed stream")]
     StreamClosed, // stream error, STREAM_CLOSED
-    #[error("test")]
+    #[error("malformed request")]
     MalformedRequest, // stream error, PROTOCOL_ERROR
 }
 
-impl From<Utf8Error> for AssembleError {
-    fn from(_: Utf8Error) -> Self {
-        Self::MalformedRequest
-    }
-}
-
-struct Assembled {
+pub struct Assembled {
     stream_id: u32,
     request: Request,
 }
 
 struct Stream {
-    request: Request,              // construite dès la fin du bloc de headers, body vide
-    body: Vec<u8>,                 // ce que les DATA ont apporté jusqu'ici
-    content_length: Option<usize>, // le content-length annoncé, comparé à END_STREAM
+    request: Request,              // built when the header block ends, empty body
+    body: Vec<u8>,                 // bytes received in DATA frames so far
+    content_length: Option<usize>, // announced content-length, checked at END_STREAM
 }
 
 struct PendingBlock {
-    stream_id: u32,   // pour vérifier que les CONTINUATION arrivent sur le bon stream
-    end_stream: bool, // END_STREAM vu sur la frame HEADERS, à retenir jusqu'à END_HEADERS
-    block: Vec<u8>,   // les fragments concaténés, limités à MAX_HEADER_BLOCK_SIZE
+    stream_id: u32,   // CONTINUATION frames must arrive on this stream
+    end_stream: bool, // END_STREAM seen on HEADERS, kept until END_HEADERS
+    block: Vec<u8>,   // concatenated fragments, at most MAX_HEADER_BLOCK_SIZE
 }
 
 pub const MAX_HEADER_BLOCK_SIZE: usize = 16_384;
 
+#[derive(Default)]
 pub struct Assembler {
-    decoder: Decoder,              // un seul par connexion : la table dynamique HPACK
-    pending: Option<PendingBlock>, // le « fax » en cours
-    streams: HashMap<u32, Stream>, // les requêtes qui attendent leur body
+    decoder: Decoder,              // one per connection: owns the HPACK dynamic table
+    pending: Option<PendingBlock>, // header block still waiting for END_HEADERS
+    streams: HashMap<u32, Stream>, // requests still waiting for their body
     last_stream_id: u32,
 }
 
@@ -84,11 +78,38 @@ fn strip_padding(flags: Flags, payload: &[u8]) -> Result<&[u8], AssembleError> {
         return Err(AssembleError::InvalidPadding);
     }
 
-    let (rest_unpadded, _) = rest
-        .split_at_checked(rest.len() - usize::from(pad_len))
-        .ok_or(AssembleError::InvalidPadding)?;
+    rest = &rest[..rest.len() - usize::from(pad_len)];
 
-    Ok(rest_unpadded)
+    Ok(rest)
+}
+
+fn is_valid_field(name: &[u8], value: &[u8]) -> bool {
+    if name
+        .iter()
+        .any(|n| matches!(n, 0x00..=0x20 | 0x41..=0x5A | 0x7F..=0xFF))
+    {
+        return true;
+    }
+    if value
+        .iter()
+        .any(|byte| matches!(byte, b'\n' | b'\0' | b'\r'))
+    {
+        return true;
+    }
+
+    if matches!(value.first(), Some(b' ' | b'\t')) || matches!(value.last(), Some(b' ' | b'\t')) {
+        return true;
+    }
+
+    if name.is_empty() {
+        return true;
+    }
+
+    if name.iter().skip(1).any(|v| matches!(v, 0x3A)) {
+        return true;
+    }
+
+    false
 }
 
 fn build_request(fields: Vec<HeaderField>) -> Result<(Request, Option<usize>), AssembleError> {
@@ -100,9 +121,10 @@ fn build_request(fields: Vec<HeaderField>) -> Result<(Request, Option<usize>), A
     let mut content_length = None;
     let mut headers = Headers::default();
     for (name, value) in fields {
-        let decoded_name = str::from_utf8(&name)?;
-        let decoded_value = str::from_utf8(&value)?;
-        if name.iter().any(u8::is_ascii_uppercase) {
+        let decoded_name = str::from_utf8(&name).map_err(|_| AssembleError::MalformedRequest)?;
+        let decoded_value = str::from_utf8(&value).map_err(|_| AssembleError::MalformedRequest)?;
+
+        if !is_valid_field(name.as_slice(), value.as_slice()) {
             return Err(AssembleError::MalformedRequest);
         }
 
@@ -115,13 +137,10 @@ fn build_request(fields: Vec<HeaderField>) -> Result<(Request, Option<usize>), A
                     "method" => &mut method,
                     "scheme" => &mut scheme,
                     "authority" => &mut authority,
-                    "path" => {
-                        if decoded_value.is_empty() {
-                            return Err(AssembleError::MalformedRequest);
-                        }
-
-                        &mut path
+                    "path" if decoded_value.is_empty() => {
+                        return Err(AssembleError::MalformedRequest);
                     }
+                    "path" => &mut path,
                     _ => return Err(AssembleError::MalformedRequest),
                 };
 
@@ -196,13 +215,13 @@ impl Assembler {
             last_stream_id: 0,
             streams: HashMap::new(),
             pending: None,
-            decoder: Decoder::new(4096, MAX_HEADER_BLOCK_SIZE),
+            decoder: Decoder::new(SETTINGS_HEADER_TABLE_SIZE, MAX_HEADER_BLOCK_SIZE),
         }
     }
 
     fn on_header(&mut self, frame: &Frame) -> Result<Option<Assembled>, AssembleError> {
         let stream_id = *frame.stream_id();
-        if stream_id % 2 == 0 || stream_id <= self.last_stream_id {
+        if stream_id.is_multiple_of(2) || stream_id <= self.last_stream_id {
             return Err(AssembleError::InvalidStreamId);
         }
 

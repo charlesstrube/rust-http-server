@@ -9,7 +9,7 @@ use std::io::{BufRead, Write};
 use crate::{
     http::{request::Request, response::Response},
     http2::{
-        assembler::Assembler,
+        assembler::{AssembleError, Assembler},
         connection::{Decision, handle_frame},
         frame::{Flags, Frame, FrameType, read_frame},
         settings::Settings,
@@ -24,6 +24,13 @@ pub fn react(decision: Decision, mut writer: impl Write) -> bool {
         Decision::Continue => true,
         Decision::Close => false,
     }
+}
+
+fn is_connection_error(error: AssembleError) -> bool {
+    !matches!(
+        error,
+        AssembleError::StreamClosed | AssembleError::MalformedRequest
+    )
 }
 
 pub fn serve(
@@ -52,12 +59,18 @@ pub fn serve(
         _ => return, // EOF, read error, or another frame type
     };
 
-    let assembler = Assembler::new();
-
-    // println!("{:?}", assembler);
+    let mut assembler = Assembler::new();
 
     while let Ok(Some(frame)) = read_frame(&mut reader, max) {
-        if !react(handle_frame(frame, &mut peer_settings), &mut writer) {
+        let continue_connection = match assembler.on_frame(&frame) {
+            Ok(_) => true,
+            Err(error) => {
+                println!("http2: {error}");
+                !is_connection_error(error)
+            }
+        };
+
+        if continue_connection && !react(handle_frame(frame, &mut peer_settings), &mut writer) {
             return;
         }
     }

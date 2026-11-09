@@ -12,6 +12,12 @@ pub struct DynamicTable {
     size: usize,
 }
 
+impl Default for DynamicTable {
+    fn default() -> Self {
+        Self::new(SETTINGS_HEADER_TABLE_SIZE)
+    }
+}
+
 fn get_size(name: &[u8], value: &[u8]) -> usize {
     name.len() + value.len() + 32
 }

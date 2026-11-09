@@ -8,10 +8,10 @@ const CONTINUATION_FLAG: u8 = 0x80;
 /*
  * Format	                 result
  * {:08b}	                01000001
- * {:#010b}	                0b01000001 (le préfixe 0b compte dans les 10 caractères)
+ * {:#010b}	                0b01000001 (the 0b prefix counts in the 10 characters)
  * {:02x}	                41
  * {:#04x}	                0x41
- * {:02x?} sur un slice	    [41, 0f, 77, 77]
+ * {:02x?} on a slice	    [41, 0f, 77, 77]
 */
 
 // RFC 7541 §5.1: decodes an integer whose first byte uses its `prefix_bits`

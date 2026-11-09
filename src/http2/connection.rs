@@ -43,13 +43,8 @@ pub fn handle_frame(frame: Frame, peer_settings: &mut Settings) -> Decision {
             Decision::Close
         }
         FrameType::Settings if frame.flags().contains(Flags::ACK) => Decision::Continue,
-        FrameType::Settings => {
-            if peer_settings.apply(frame.payload()).is_err() {
-                return Decision::Close;
-            }
-
-            Decision::Reply(Frame::new(FrameType::Settings, Flags::ACK, 0, []))
-        }
+        FrameType::Settings if peer_settings.apply(frame.payload()).is_err() => Decision::Close,
+        FrameType::Settings => Decision::Reply(Frame::new(FrameType::Settings, Flags::ACK, 0, [])),
         FrameType::Ping if frame.stream_id() != &0 => Decision::Close,
         FrameType::Ping if frame.payload().len() != 8 => Decision::Close,
         FrameType::Ping if frame.flags().contains(Flags::ACK) => Decision::Continue,
