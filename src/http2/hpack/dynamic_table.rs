@@ -87,6 +87,7 @@ impl DynamicTable {
     }
 
     // Sum of the entry sizes (name + value + 32 each).
+    #[cfg(test)]
     pub fn size(&self) -> usize {
         self.size
     }
@@ -101,6 +102,7 @@ impl DynamicTable {
         self.size = size;
     }
 
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.entries.len()
     }

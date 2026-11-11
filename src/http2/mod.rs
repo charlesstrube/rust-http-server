@@ -2,6 +2,7 @@ pub mod assembler;
 pub mod connection;
 pub mod frame;
 pub mod hpack;
+pub mod serialize;
 pub mod settings;
 
 use std::io::{BufRead, Write};
@@ -12,6 +13,7 @@ use crate::{
         assembler::{AssembleError, Assembler},
         connection::{Decision, handle_frame},
         frame::{Flags, Frame, FrameType, read_frame},
+        serialize::serialize_response,
         settings::Settings,
     },
 };
@@ -36,7 +38,7 @@ fn is_connection_error(error: AssembleError) -> bool {
 pub fn serve(
     mut reader: impl BufRead, // reader
     mut writer: impl Write,   // writer
-    _handler: impl Fn(&Request) -> Response,
+    handler: impl Fn(&Request) -> Response,
 ) {
     let local_settings = Settings::default();
     let mut peer_settings = Settings::default();
@@ -47,10 +49,8 @@ pub fn serve(
         return;
     };
 
-    let max = local_settings.max_frame_size();
-
     // RFC 9113 §3.4: the client preface must be followed by a SETTINGS frame.
-    match read_frame(&mut reader, max) {
+    match read_frame(&mut reader, local_settings.max_frame_size()) {
         Ok(Some(frame)) if frame.frame_type() == FrameType::Settings => {
             if !react(handle_frame(frame, &mut peer_settings), &mut writer) {
                 return;
@@ -61,9 +61,24 @@ pub fn serve(
 
     let mut assembler = Assembler::new();
 
-    while let Ok(Some(frame)) = read_frame(&mut reader, max) {
+    while let Ok(Some(frame)) = read_frame(&mut reader, peer_settings.max_frame_size()) {
         let continue_connection = match assembler.on_frame(&frame) {
-            Ok(_) => true,
+            Ok(Some(assembled)) => {
+                let (stream_id, request) = assembled.into_parts();
+                let response = handler(&request);
+
+                let frames =
+                    serialize_response(stream_id, response, peer_settings.max_frame_size());
+
+                for frame in frames.iter() {
+                    if !writer.write_all(&frame.to_bytes()).is_ok() {
+                        return;
+                    }
+                }
+
+                true
+            }
+            Ok(None) => true,
             Err(error) => {
                 println!("http2: {error}");
                 !is_connection_error(error)
@@ -299,6 +314,151 @@ mod test {
         assert_eq!(
             run(vec![settings([]), big, ping([1; 8])]),
             vec![server_settings(), settings_ack()]
+        );
+    }
+
+    // --- Responses (step 7) ---
+
+    use crate::http::{headers::Headers, status::StatusCode};
+    use crate::http2::hpack::encoder::encode;
+
+    // Same as `run`, with the handler under test instead of `not_found`.
+    fn run_with(input: Vec<Frame>, handler: impl Fn(&Request) -> Response) -> Vec<Frame> {
+        let bytes: Vec<u8> = input.iter().flat_map(Frame::to_bytes).collect();
+        let mut output = Vec::new();
+        serve(Cursor::new(bytes), &mut output, handler);
+
+        let mut reader = Cursor::new(output);
+        let mut frames = Vec::new();
+        while let Some(frame) = read_frame(&mut reader, u32::MAX).unwrap() {
+            frames.push(frame);
+        }
+        frames
+    }
+
+    fn echo_path(request: &Request) -> Response {
+        Response::new(
+            StatusCode::Ok,
+            Headers::default(),
+            request.path().to_owned(),
+        )
+    }
+
+    fn echo_body(request: &Request) -> Response {
+        Response::new(
+            StatusCode::Ok,
+            Headers::default(),
+            request.body().to_owned(),
+        )
+    }
+
+    fn request(stream_id: u32, flags: Flags, method: &str, path: &str) -> Frame {
+        let block = encode(&[(":method", method), (":scheme", "http"), (":path", path)]);
+        Frame::new(FrameType::Headers, flags, stream_id, block)
+    }
+
+    fn get(stream_id: u32, path: &str) -> Frame {
+        request(
+            stream_id,
+            Flags::END_HEADERS | Flags::END_STREAM,
+            "GET",
+            path,
+        )
+    }
+
+    fn data(stream_id: u32, flags: Flags, payload: &[u8]) -> Frame {
+        Frame::new(FrameType::Data, flags, stream_id, payload)
+    }
+
+    // What follows the connection preface in every response test.
+    fn responses(frames: Vec<Frame>) -> Vec<Frame> {
+        assert_eq!(frames[..2], [server_settings(), settings_ack()]);
+        frames.into_iter().skip(2).collect()
+    }
+
+    #[test]
+    fn get_is_answered_on_its_stream() {
+        let frames = responses(run_with(vec![settings([]), get(1, "/echo/abc")], echo_path));
+
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].frame_type(), FrameType::Headers);
+        assert_eq!(frames[0].flags(), Flags::END_HEADERS);
+        assert_eq!(*frames[0].stream_id(), 1);
+        assert_eq!(frames[1], data(1, Flags::END_STREAM, b"/echo/abc"));
+    }
+
+    #[test]
+    fn post_body_reaches_the_handler() {
+        let input = vec![
+            settings([]),
+            request(1, Flags::END_HEADERS, "POST", "/files/a"),
+            data(1, Flags::empty(), b"ab"),
+            data(1, Flags::END_STREAM, b"c"),
+        ];
+        let frames = responses(run_with(input, echo_body));
+
+        assert_eq!(frames[1], data(1, Flags::END_STREAM, b"abc"));
+    }
+
+    // Nothing is answered before END_STREAM: the request is not complete yet.
+    #[test]
+    fn no_response_before_end_stream() {
+        let input = vec![
+            settings([]),
+            request(1, Flags::END_HEADERS, "POST", "/files/a"),
+            data(1, Flags::empty(), b"ab"),
+        ];
+
+        assert_eq!(responses(run_with(input, echo_body)), vec![]);
+    }
+
+    // Until step 10, streams are handled one after the other, in arrival order.
+    #[test]
+    fn sequential_requests_are_answered_in_order() {
+        let input = vec![settings([]), get(1, "/one"), get(3, "/three")];
+        let frames = responses(run_with(input, echo_path));
+
+        let data: Vec<_> = frames
+            .iter()
+            .filter(|frame| frame.frame_type() == FrameType::Data)
+            .collect();
+        assert_eq!(data[0], &self::data(1, Flags::END_STREAM, b"/one"));
+        assert_eq!(data[1], &self::data(3, Flags::END_STREAM, b"/three"));
+    }
+
+    // We send what the PEER can receive: SETTINGS_MAX_FRAME_SIZE = 32_768 here.
+    #[test]
+    fn response_uses_the_peer_max_frame_size() {
+        let big_frames = [0x00, 0x05, 0x00, 0x00, 0x80, 0x00];
+        let input = vec![settings(big_frames), get(1, "/big")];
+        let frames = responses(run_with(input, |_: &Request| {
+            Response::new(StatusCode::Ok, Headers::default(), vec![0u8; 40_000])
+        }));
+
+        let sizes: Vec<_> = frames
+            .iter()
+            .filter(|frame| frame.frame_type() == FrameType::Data)
+            .map(|frame| frame.payload().len())
+            .collect();
+        assert_eq!(sizes, vec![32_768, 7_232]);
+    }
+
+    // A malformed request (no :path) is a stream error: the handler is not called and
+    // the connection goes on. Step 8 will answer it with RST_STREAM(PROTOCOL_ERROR).
+    #[test]
+    fn malformed_request_is_not_answered_but_the_connection_goes_on() {
+        let block = encode(&[(":method", "GET"), (":scheme", "http")]);
+        let malformed = Frame::new(
+            FrameType::Headers,
+            Flags::END_HEADERS | Flags::END_STREAM,
+            1,
+            block,
+        );
+        let input = vec![settings([]), malformed, ping([1; 8])];
+
+        assert_eq!(
+            responses(run_with(input, |_: &Request| panic!("handler called"))),
+            vec![ping_ack([1; 8])]
         );
     }
 }

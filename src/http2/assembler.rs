@@ -35,6 +35,12 @@ pub struct Assembled {
     request: Request,
 }
 
+impl Assembled {
+    pub fn into_parts(self) -> (u32, Request) {
+        (self.stream_id, self.request)
+    }
+}
+
 struct Stream {
     request: Request,              // built when the header block ends, empty body
     body: Vec<u8>,                 // bytes received in DATA frames so far
@@ -88,28 +94,28 @@ fn is_valid_field(name: &[u8], value: &[u8]) -> bool {
         .iter()
         .any(|n| matches!(n, 0x00..=0x20 | 0x41..=0x5A | 0x7F..=0xFF))
     {
-        return true;
+        return false;
     }
     if value
         .iter()
         .any(|byte| matches!(byte, b'\n' | b'\0' | b'\r'))
     {
-        return true;
+        return false;
     }
 
     if matches!(value.first(), Some(b' ' | b'\t')) || matches!(value.last(), Some(b' ' | b'\t')) {
-        return true;
+        return false;
     }
 
     if name.is_empty() {
-        return true;
+        return false;
     }
 
     if name.iter().skip(1).any(|v| matches!(v, 0x3A)) {
-        return true;
+        return false;
     }
 
-    false
+    true
 }
 
 fn build_request(fields: Vec<HeaderField>) -> Result<(Request, Option<usize>), AssembleError> {

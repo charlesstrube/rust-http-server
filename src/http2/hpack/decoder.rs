@@ -4,7 +4,6 @@ use crate::http2::hpack::{
 };
 
 const STATIC_TABLE_LEN: usize = 61;
-const MAX_HEADER_LIST_SIZE: usize = 16_384;
 // RFC 7541 §3 and §6: turns header blocks into (name, value) pairs.
 // One decoder per connection: the dynamic table is shared by every block, in order.
 #[derive(Default)]
@@ -117,6 +116,7 @@ mod test {
     use super::*;
 
     const DEFAULT_LIMIT: usize = 4_096;
+    const MAX_HEADER_LIST_SIZE: usize = 16_384;
 
     // Decodes with `decoder` and turns the headers into strings for readable asserts.
     fn decode_with(

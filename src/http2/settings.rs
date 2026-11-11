@@ -92,6 +92,7 @@ impl Settings {
                     self.initial_window_size = value;
                 }
                 SettingId::MaxFrameSize => {
+                    print!("------MaxFrameSize: {}", &value);
                     if !(16_384..=16_777_215).contains(&value) {
                         return Err(SettingsError::MaxFrameSize);
                     }

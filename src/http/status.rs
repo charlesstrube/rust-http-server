@@ -22,7 +22,7 @@ impl StatusCode {
         }
     }
 
-    fn code(&self) -> u16 {
+    pub fn code(&self) -> u16 {
         match self {
             StatusCode::Ok => 200,
             StatusCode::Created => 201,
