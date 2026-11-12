@@ -61,7 +61,7 @@ pub fn serve(
 
     let mut assembler = Assembler::new();
 
-    while let Ok(Some(frame)) = read_frame(&mut reader, peer_settings.max_frame_size()) {
+    while let Ok(Some(frame)) = read_frame(&mut reader, local_settings.max_frame_size()) {
         let continue_connection = match assembler.on_frame(&frame) {
             Ok(Some(assembled)) => {
                 let (stream_id, request) = assembled.into_parts();
@@ -76,11 +76,16 @@ pub fn serve(
                     }
                 }
 
+                // The response is complete: send it now, the client is waiting.
+                if writer.flush().is_err() {
+                    return;
+                }
+
                 true
             }
             Ok(None) => true,
             Err(error) => {
-                println!("http2: {error}");
+                eprintln!("http2: {error}");
                 !is_connection_error(error)
             }
         };
@@ -313,6 +318,19 @@ mod test {
 
         assert_eq!(
             run(vec![settings([]), big, ping([1; 8])]),
+            vec![server_settings(), settings_ack()]
+        );
+    }
+
+    // The peer's SETTINGS_MAX_FRAME_SIZE (32_768 here) only bounds what WE send.
+    // What we read stays bounded by what we announced: the default 16_384.
+    #[test]
+    fn peer_max_frame_size_does_not_raise_our_receive_limit() {
+        let big_frames = [0x00, 0x05, 0x00, 0x00, 0x80, 0x00];
+        let big = Frame::new(FrameType::Unknown(0xbe), Flags::empty(), 0, vec![0; 20_000]);
+
+        assert_eq!(
+            run(vec![settings(big_frames), big, ping([1; 8])]),
             vec![server_settings(), settings_ack()]
         );
     }

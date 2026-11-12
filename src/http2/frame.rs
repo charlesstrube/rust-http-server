@@ -1,6 +1,6 @@
 use std::{
     io::{Error, ErrorKind, Read},
-    ops::BitOr,
+    ops::{BitOr, BitOrAssign},
 };
 
 pub(crate) const DEFAULT_MAX_FRAME_SIZE: u32 = 16_384;
@@ -80,6 +80,12 @@ impl BitOr<Flags> for Flags {
     type Output = Self;
     fn bitor(self, rhs: Self) -> Self::Output {
         Self(self.0 | rhs.0)
+    }
+}
+
+impl BitOrAssign<Flags> for Flags {
+    fn bitor_assign(&mut self, rhs: Flags) {
+        self.0 |= rhs.0;
     }
 }
 

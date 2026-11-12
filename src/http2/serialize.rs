@@ -20,15 +20,17 @@ use crate::{
 
 fn encode_into_payloads(headers: Headers, payload: &mut Vec<u8>) {
     for (name, value) in headers.iter() {
+        // RFC 9113 §8.2.2: connection-specific headers are forbidden
         // clean up forbidden header in http2
+        let lowercase_name = name.to_ascii_lowercase();
         if matches!(
-            name.to_ascii_lowercase().as_str(),
+            lowercase_name.as_str(),
             "connection" | "keep-alive" | "proxy-connection" | "transfer-encoding" | "upgrade"
         ) {
             continue;
         }
 
-        let bytes = encode(&[(name.to_ascii_lowercase().as_str(), value)]);
+        let bytes = encode(&[(lowercase_name.as_str(), value)]);
 
         payload.extend_from_slice(&bytes);
     }
@@ -37,35 +39,29 @@ fn encode_into_payloads(headers: Headers, payload: &mut Vec<u8>) {
 pub fn serialize_response(stream_id: u32, response: Response, max_frame_size: u32) -> Vec<Frame> {
     let (status_code, mut headers, body) = response.into_parts();
 
-    let mut pseudo_headers = Headers::default();
-
+    // pseudo headers
     let code = status_code.code().to_string();
-
-    pseudo_headers.set(":status", &code);
-
-    if body.len() > 0 {
-        headers.set("content-length", &body.len().to_string());
-    }
-
+    let bytes = encode(&[(":status".to_ascii_lowercase().as_str(), &code)]);
     let mut serialized_headers = Vec::<u8>::new();
+    serialized_headers.extend_from_slice(&bytes);
 
-    encode_into_payloads(pseudo_headers, &mut serialized_headers);
+    headers.set("content-length", &body.len().to_string());
     encode_into_payloads(headers, &mut serialized_headers);
 
     let header_payloads = serialized_headers.chunks(max_frame_size as usize);
     let header_frame_length = header_payloads.len();
     let mut frames: Vec<Frame> = vec![];
 
-    for (index, payload) in header_payloads.into_iter().enumerate() {
+    for (index, payload) in header_payloads.enumerate() {
         let is_first = index == 0;
         let is_last = index + 1 == header_frame_length;
 
         let mut flags = Flags::empty();
         if body.is_empty() && is_first {
-            flags = flags | Flags::END_STREAM;
+            flags |= Flags::END_STREAM;
         }
         if is_last {
-            flags = flags | Flags::END_HEADERS;
+            flags |= Flags::END_HEADERS;
         }
 
         let frame_type = if is_first {
@@ -80,11 +76,11 @@ pub fn serialize_response(stream_id: u32, response: Response, max_frame_size: u3
     let body_payloads = body.chunks(max_frame_size as usize);
     let body_frame_length = body_payloads.len();
 
-    for (index, payload) in body_payloads.into_iter().enumerate() {
+    for (index, payload) in body_payloads.enumerate() {
         let is_last = index + 1 == body_frame_length;
         let mut flags = Flags::empty();
         if is_last {
-            flags = flags | Flags::END_STREAM
+            flags |= Flags::END_STREAM
         }
 
         frames.push(Frame::new(FrameType::Data, flags, stream_id, payload));
@@ -268,6 +264,20 @@ mod test {
             .filter(|(name, _)| name == "content-length")
             .collect();
         assert_eq!(lengths, vec![("content-length".into(), "3".into())]);
+    }
+
+    // §8.1.1: a content-length that disagrees with the DATA frames makes the response
+    // malformed. An empty body must not keep the handler's stale value.
+    #[test]
+    fn stale_content_length_is_replaced_on_an_empty_body() {
+        let response = with_headers(&[("Content-Length", "999")], vec![]);
+        let frames = serialize_response(1, response, MAX);
+
+        let lengths: Vec<_> = fields(&frames)
+            .into_iter()
+            .filter(|(name, _)| name == "content-length")
+            .collect();
+        assert_eq!(lengths, vec![("content-length".into(), "0".into())]);
     }
 
     // --- Frames and flags (RFC 9113 §6.1, §6.2, §8.1) ---

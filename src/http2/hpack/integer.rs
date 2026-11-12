@@ -79,7 +79,7 @@ pub fn encode_integer(value: usize, prefix_bits: u8, flags: u8, out: &mut Vec<u8
         while rest >= 128 {
             let current = rest & 0x7F;
             let mut byte = current as u8;
-            byte = byte | 0x80;
+            byte |= 0x80;
             rest >>= 7;
             out.push(byte);
         }
