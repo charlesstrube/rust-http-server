@@ -1,12 +1,14 @@
 use crate::http2::{
+    error::ErrorCode,
     frame::{Flags, Frame, FrameType},
     settings::Settings,
 };
 
+#[derive(Debug, PartialEq)]
 pub enum Decision {
-    Continue,     // nothing to write
-    Reply(Frame), // write this frame, then keep reading
-    Close,        // connection error or GOAWAY: stop
+    Continue,         // nothing to write
+    Reply(Frame),     // write this frame, then keep reading
+    Close(ErrorCode), // connection error or GOAWAY: stop
 }
 
 // Connection-level frame handling (RFC 9113). Rules are evaluated top to
@@ -36,22 +38,24 @@ pub enum Decision {
 
 pub fn handle_frame(frame: Frame, peer_settings: &mut Settings) -> Decision {
     match frame.frame_type() {
-        FrameType::Settings if frame.stream_id() != &0 => Decision::Close,
+        FrameType::Settings if frame.stream_id() != &0 => Decision::Close(ErrorCode::ProtocolError),
         FrameType::Settings
             if frame.flags().contains(Flags::ACK) && !frame.payload().is_empty() =>
         {
-            Decision::Close
+            Decision::Close(ErrorCode::FrameSizeError)
         }
         FrameType::Settings if frame.flags().contains(Flags::ACK) => Decision::Continue,
-        FrameType::Settings if peer_settings.apply(frame.payload()).is_err() => Decision::Close,
+        FrameType::Settings if let Err(error) = peer_settings.apply(frame.payload()) => {
+            Decision::Close(error.into())
+        }
         FrameType::Settings => Decision::Reply(Frame::new(FrameType::Settings, Flags::ACK, 0, [])),
-        FrameType::Ping if frame.stream_id() != &0 => Decision::Close,
-        FrameType::Ping if frame.payload().len() != 8 => Decision::Close,
+        FrameType::Ping if frame.stream_id() != &0 => Decision::Close(ErrorCode::ProtocolError),
+        FrameType::Ping if frame.payload().len() != 8 => Decision::Close(ErrorCode::FrameSizeError),
         FrameType::Ping if frame.flags().contains(Flags::ACK) => Decision::Continue,
         FrameType::Ping => {
             Decision::Reply(Frame::new(FrameType::Ping, Flags::ACK, 0, frame.payload()))
         }
-        FrameType::GoAway => Decision::Close,
+        FrameType::GoAway => Decision::Close(ErrorCode::NoError),
         FrameType::Unknown(_) => Decision::Continue,
         _ => Decision::Continue,
     }

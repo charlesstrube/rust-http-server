@@ -225,6 +225,10 @@ impl Assembler {
         }
     }
 
+    pub fn last_stream_id(&self) -> u32 {
+        self.last_stream_id
+    }
+
     fn on_header(&mut self, frame: &Frame) -> Result<Option<Assembled>, AssembleError> {
         let stream_id = *frame.stream_id();
         if stream_id.is_multiple_of(2) || stream_id <= self.last_stream_id {

@@ -1,5 +1,6 @@
 pub mod assembler;
 pub mod connection;
+pub mod error;
 pub mod frame;
 pub mod hpack;
 pub mod serialize;
@@ -12,6 +13,7 @@ use crate::{
     http2::{
         assembler::{AssembleError, Assembler},
         connection::{Decision, handle_frame},
+        error::{ErrorCode, goaway},
         frame::{Flags, Frame, FrameType, read_frame},
         serialize::serialize_response,
         settings::Settings,
@@ -20,11 +22,21 @@ use crate::{
 
 pub(crate) const PREFACE: &[u8; 24] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 
-pub fn react(decision: Decision, mut writer: impl Write) -> bool {
+pub fn go_away(writer: &mut impl Write, last_stream_id: u32, code: ErrorCode) {
+    let frame = goaway(last_stream_id, code, &[]);
+    if writer.write_all(&frame.to_bytes()).is_ok() {
+        writer.flush().ok();
+    };
+}
+
+pub fn react(decision: Decision, last_stream_id: u32, mut writer: impl Write) -> bool {
     match decision {
         Decision::Reply(frame) => writer.write_all(&frame.to_bytes()).is_ok(),
         Decision::Continue => true,
-        Decision::Close => false,
+        Decision::Close(code) => {
+            go_away(&mut writer, last_stream_id, code);
+            false
+        }
     }
 }
 
@@ -52,7 +64,7 @@ pub fn serve(
     // RFC 9113 §3.4: the client preface must be followed by a SETTINGS frame.
     match read_frame(&mut reader, local_settings.max_frame_size()) {
         Ok(Some(frame)) if frame.frame_type() == FrameType::Settings => {
-            if !react(handle_frame(frame, &mut peer_settings), &mut writer) {
+            if !react(handle_frame(frame, &mut peer_settings), 0, &mut writer) {
                 return;
             }
         }
@@ -90,7 +102,13 @@ pub fn serve(
             }
         };
 
-        if continue_connection && !react(handle_frame(frame, &mut peer_settings), &mut writer) {
+        if continue_connection
+            && !react(
+                handle_frame(frame, &mut peer_settings),
+                assembler.last_stream_id(),
+                &mut writer,
+            )
+        {
             return;
         }
     }
@@ -144,9 +162,14 @@ mod test {
         Frame::new(FrameType::Ping, Flags::ACK, 0, payload)
     }
 
-    fn goaway() -> Frame {
+    fn client_goaway() -> Frame {
         // last stream id (4 bytes) + NO_ERROR (4 bytes)
         Frame::new(FrameType::GoAway, Flags::empty(), 0, [0u8; 8])
+    }
+
+    // No stream was opened in these tests: the last stream id is always 0.
+    fn server_goaway(code: ErrorCode) -> Frame {
+        goaway(0, code, &[])
     }
 
     // --- Connection preface (RFC 9113 §3.4) ---
@@ -202,7 +225,10 @@ mod test {
     fn settings_on_a_stream_close_the_connection() {
         let frame = Frame::new(FrameType::Settings, Flags::empty(), 1, []);
 
-        assert_eq!(run(vec![frame]), vec![server_settings()]);
+        assert_eq!(
+            run(vec![frame]),
+            vec![server_settings(), server_goaway(ErrorCode::ProtocolError)]
+        );
     }
 
     // An ACK with a payload is a FRAME_SIZE_ERROR.
@@ -212,7 +238,11 @@ mod test {
 
         assert_eq!(
             run(vec![settings([]), ack, ping([1; 8])]),
-            vec![server_settings(), settings_ack()]
+            vec![
+                server_settings(),
+                settings_ack(),
+                server_goaway(ErrorCode::FrameSizeError)
+            ]
         );
     }
 
@@ -221,7 +251,10 @@ mod test {
     fn invalid_settings_are_not_acknowledged() {
         let payload = [0x00, 0x02, 0x00, 0x00, 0x00, 0x02];
 
-        assert_eq!(run(vec![settings(payload)]), vec![server_settings()]);
+        assert_eq!(
+            run(vec![settings(payload)]),
+            vec![server_settings(), server_goaway(ErrorCode::ProtocolError)]
+        );
     }
 
     // --- PING (RFC 9113 §6.7) ---
@@ -265,7 +298,11 @@ mod test {
 
         assert_eq!(
             run(vec![settings([]), frame, ping([2; 8])]),
-            vec![server_settings(), settings_ack()]
+            vec![
+                server_settings(),
+                settings_ack(),
+                server_goaway(ErrorCode::ProtocolError)
+            ]
         );
     }
 
@@ -276,18 +313,27 @@ mod test {
 
         assert_eq!(
             run(vec![settings([]), frame, ping([2; 8])]),
-            vec![server_settings(), settings_ack()]
+            vec![
+                server_settings(),
+                settings_ack(),
+                server_goaway(ErrorCode::FrameSizeError)
+            ]
         );
     }
 
     // --- Closing ---
 
     // RFC 9113 §6.8: after GOAWAY the client sends nothing new; we stop reading.
+    // Answering with our own GOAWAY(NO_ERROR) is allowed: both sides may send one.
     #[test]
     fn goaway_ends_the_connection() {
         assert_eq!(
-            run(vec![settings([]), goaway(), ping([1; 8])]),
-            vec![server_settings(), settings_ack()]
+            run(vec![settings([]), client_goaway(), ping([1; 8])]),
+            vec![
+                server_settings(),
+                settings_ack(),
+                server_goaway(ErrorCode::NoError)
+            ]
         );
     }
 
