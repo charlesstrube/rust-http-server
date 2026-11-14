@@ -1,6 +1,7 @@
 pub mod protocol;
 use std::io::{self, BufRead, BufReader, Cursor, Read};
-use std::net::TcpStream;
+use std::net::{Shutdown, TcpStream};
+use std::time::Duration;
 
 use crate::config::Config;
 use crate::handlers::handle;
@@ -8,6 +9,23 @@ use crate::http::headers::encoding::with_gzip;
 
 use crate::http2::PREFACE;
 use crate::server::protocol::Protocol;
+
+// Bounds of the lingering close (nginx: `lingering_timeout`, `lingering_time`).
+const LINGER_TIMEOUT: Duration = Duration::from_secs(1);
+const LINGER_MAX_BYTES: u64 = 1024 * 1024;
+
+// Closes politely: a FIN queued after our last bytes, then everything the
+// client still sends is discarded, so the final close() never becomes a RST
+// that could destroy the response or GOAWAY (RFC 1122 §4.2.2.13).
+fn linger(stream: &TcpStream, reader: &mut impl Read) {
+    if stream.shutdown(Shutdown::Write).is_err() {
+        return; // the client is already gone
+    }
+    if stream.set_read_timeout(Some(LINGER_TIMEOUT)).is_err() {
+        return;
+    }
+    let _ = io::copy(&mut reader.take(LINGER_MAX_BYTES), &mut io::sink());
+}
 
 fn detect(reader: &mut impl BufRead) -> io::Result<Option<(Protocol, Vec<u8>)>> {
     let mut index = 0;
@@ -49,7 +67,7 @@ pub fn handle_connection(stream: TcpStream, config: &Config) {
             }
             Protocol::Http2 => {
                 let handler = with_gzip(move |request| handle(request, config));
-                crate::http2::serve(buffer, &stream, handler);
+                crate::http2::serve(&mut buffer, &stream, handler);
             }
         },
         Ok(None) => (),
@@ -57,6 +75,8 @@ pub fn handle_connection(stream: TcpStream, config: &Config) {
             eprintln!("error: {}", error);
         }
     };
+
+    linger(&stream, &mut buffer);
 }
 
 #[cfg(test)]
