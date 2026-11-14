@@ -1,8 +1,9 @@
-use std::collections::{HashMap, hash_map::Entry};
+use std::collections::{HashMap, HashSet, hash_map::Entry};
 
 use crate::{
     http::{headers::Headers, request::Request},
     http2::{
+        error::{ErrorCode, PayloadError, parse_rst_stream},
         frame::{Flags, Frame, FrameType},
         hpack::{
             HeaderField, HpackError, decoder::Decoder, dynamic_table::SETTINGS_HEADER_TABLE_SIZE,
@@ -12,6 +13,8 @@ use crate::{
 
 #[derive(Debug, PartialEq, thiserror::Error)]
 pub enum AssembleError {
+    #[error("invalid payload length")]
+    InvalidFrameSize(#[from] PayloadError),
     #[error(transparent)]
     Hpack(#[from] HpackError), // connection error, COMPRESSION_ERROR
     #[error("invalid stream id")]
@@ -28,6 +31,29 @@ pub enum AssembleError {
     StreamClosed, // stream error, STREAM_CLOSED
     #[error("malformed request")]
     MalformedRequest, // stream error, PROTOCOL_ERROR
+}
+
+impl AssembleError {
+    pub fn code(&self) -> ErrorCode {
+        match self {
+            Self::StreamClosed => ErrorCode::StreamClosed,
+            Self::HeaderBlockTooLarge => ErrorCode::EnhanceYourCalm,
+            Self::Hpack(_) => ErrorCode::CompressionError,
+            Self::InvalidFrameSize(_) => ErrorCode::FrameSizeError,
+            Self::MalformedRequest
+            | Self::ExpectedContinuation
+            | Self::InvalidPadding
+            | Self::InvalidStreamId
+            | Self::UnexpectedContinuation => ErrorCode::ProtocolError,
+        }
+    }
+
+    pub fn is_connection_error(&self) -> bool {
+        !matches!(
+            self,
+            AssembleError::StreamClosed | AssembleError::MalformedRequest
+        )
+    }
 }
 
 pub struct Assembled {
@@ -60,6 +86,7 @@ pub struct Assembler {
     decoder: Decoder,              // one per connection: owns the HPACK dynamic table
     pending: Option<PendingBlock>, // header block still waiting for END_HEADERS
     streams: HashMap<u32, Stream>, // requests still waiting for their body
+    reset: HashSet<u32>,           // failed streams
     last_stream_id: u32,
 }
 
@@ -222,6 +249,7 @@ impl Assembler {
             streams: HashMap::new(),
             pending: None,
             decoder: Decoder::new(SETTINGS_HEADER_TABLE_SIZE, MAX_HEADER_BLOCK_SIZE),
+            reset: HashSet::new(),
         }
     }
 
@@ -230,12 +258,11 @@ impl Assembler {
     }
 
     fn on_header(&mut self, frame: &Frame) -> Result<Option<Assembled>, AssembleError> {
-        let stream_id = *frame.stream_id();
-        if stream_id.is_multiple_of(2) || stream_id <= self.last_stream_id {
+        if frame.stream_id().is_multiple_of(2) || frame.stream_id() <= self.last_stream_id {
             return Err(AssembleError::InvalidStreamId);
         }
 
-        self.last_stream_id = stream_id;
+        self.last_stream_id = frame.stream_id();
 
         let fragment = strip_padding(frame.flags(), frame.payload())?;
 
@@ -244,7 +271,7 @@ impl Assembler {
         }
 
         let pending_block = PendingBlock {
-            stream_id,
+            stream_id: frame.stream_id(),
             block: fragment.to_vec(),
             end_stream: frame.flags().contains(Flags::END_STREAM),
         };
@@ -258,14 +285,17 @@ impl Assembler {
     }
 
     fn on_data(&mut self, frame: &Frame) -> Result<Option<Assembled>, AssembleError> {
-        let current_stream_id = *frame.stream_id();
+        if self.reset.contains(&frame.stream_id()) {
+            return Ok(None);
+        }
 
-        if current_stream_id == 0 {
+        if frame.stream_id() == 0 {
             return Err(AssembleError::InvalidStreamId);
         };
-        match self.streams.entry(current_stream_id) {
+
+        match self.streams.entry(frame.stream_id()) {
             Entry::Vacant(_) => {
-                if current_stream_id > self.last_stream_id {
+                if frame.stream_id() > self.last_stream_id {
                     return Err(AssembleError::InvalidStreamId);
                 }
 
@@ -279,7 +309,7 @@ impl Assembler {
                 stream.body.extend_from_slice(data);
 
                 if frame.flags().contains(Flags::END_STREAM) {
-                    complete(current_stream_id, entry.remove())
+                    complete(frame.stream_id(), entry.remove())
                 } else {
                     Ok(None)
                 }
@@ -309,8 +339,7 @@ impl Assembler {
         frame: &Frame,
         mut pending: PendingBlock,
     ) -> Result<Option<Assembled>, AssembleError> {
-        if frame.frame_type() != FrameType::Continuation || pending.stream_id != *frame.stream_id()
-        {
+        if frame.frame_type() != FrameType::Continuation || pending.stream_id != frame.stream_id() {
             return Err(AssembleError::ExpectedContinuation);
         }
 
@@ -327,17 +356,49 @@ impl Assembler {
         }
     }
 
-    pub fn on_frame(&mut self, frame: &Frame) -> Result<Option<Assembled>, AssembleError> {
+    fn on_rst_stream(&mut self, frame: &Frame) -> Result<Option<Assembled>, AssembleError> {
+        // connection error
+        if frame.stream_id() == 0 {
+            return Err(AssembleError::InvalidStreamId);
+        }
+
+        // ignoring for now
+        let _code = parse_rst_stream(frame.payload())?;
+
+        // stream was never opened
+        if frame.stream_id() > self.last_stream_id {
+            return Err(AssembleError::InvalidStreamId);
+        }
+
+        self.streams.remove(&frame.stream_id());
+        self.reset.insert(frame.stream_id());
+        Ok(None)
+    }
+
+    fn dispatch(&mut self, frame: &Frame) -> Result<Option<Assembled>, AssembleError> {
         if let Some(pending) = self.pending.take() {
             self.on_continuation(frame, pending)
         } else {
             match frame.frame_type() {
                 FrameType::Data => self.on_data(frame),
                 FrameType::Headers => self.on_header(frame),
+                FrameType::RstStream => self.on_rst_stream(frame),
                 FrameType::Continuation => Err(AssembleError::UnexpectedContinuation),
                 _ => Ok(None),
             }
         }
+    }
+
+    pub fn on_frame(&mut self, frame: &Frame) -> Result<Option<Assembled>, AssembleError> {
+        let result = self.dispatch(frame);
+
+        if let Err(error) = &result
+            && !error.is_connection_error()
+        {
+            self.reset.insert(frame.stream_id());
+        }
+
+        result
     }
 }
 
@@ -836,6 +897,86 @@ mod test {
         );
 
         assert!(matches!(result, Err(AssembleError::StreamClosed)));
+    }
+
+    // --- Reset streams (RFC 9113 §5.1, step 8) ---
+    //
+    // After a stream error the server sends RST_STREAM, but the client may have
+    // sent more frames on that stream before receiving it: they MUST be ignored.
+
+    #[test]
+    fn data_after_a_malformed_request_is_ignored() {
+        let mut assembler = Assembler::new();
+
+        let rejected = assembler.on_frame(&headers(1, Flags::END_HEADERS, &without(":path")));
+        let late = assembler.on_frame(&data(1, Flags::END_STREAM, b"hi"));
+
+        assert!(matches!(rejected, Err(AssembleError::MalformedRequest)));
+        assert!(matches!(late, Ok(None)));
+    }
+
+    #[test]
+    fn data_after_a_content_length_mismatch_is_ignored() {
+        let fields = [
+            (":method", "POST"),
+            (":scheme", "http"),
+            (":path", "/files/a"),
+            ("content-length", "5"),
+        ];
+        let mut assembler = Assembler::new();
+        feed(
+            &mut assembler,
+            vec![headers(1, Flags::END_HEADERS, &fields)],
+        );
+
+        let rejected = assembler.on_frame(&data(1, Flags::END_STREAM, b"hi"));
+        let late = assembler.on_frame(&data(1, Flags::END_STREAM, b"more"));
+
+        assert!(matches!(rejected, Err(AssembleError::MalformedRequest)));
+        assert!(matches!(late, Ok(None)));
+    }
+
+    // The first late DATA is STREAM_CLOSED; the following ones are ignored.
+    #[test]
+    fn data_after_stream_closed_is_ignored() {
+        let mut assembler = Assembler::new();
+        feed(&mut assembler, vec![headers(1, end_all(), GET)]);
+
+        let first = assembler.on_frame(&data(1, Flags::END_STREAM, b"late"));
+        let second = assembler.on_frame(&data(1, Flags::END_STREAM, b"later"));
+
+        assert!(matches!(first, Err(AssembleError::StreamClosed)));
+        assert!(matches!(second, Ok(None)));
+    }
+
+    // Resetting stream 1 has no effect on stream 3.
+    #[test]
+    fn a_reset_stream_does_not_affect_the_others() {
+        let mut assembler = Assembler::new();
+        let rejected = assembler.on_frame(&headers(1, Flags::END_HEADERS, &without(":path")));
+
+        let assembled = assembler
+            .on_frame(&headers(3, end_all(), GET))
+            .unwrap()
+            .unwrap();
+        let late = assembler.on_frame(&data(1, Flags::END_STREAM, b"hi"));
+
+        assert!(matches!(rejected, Err(AssembleError::MalformedRequest)));
+        assert_eq!(assembled.stream_id, 3);
+        assert!(matches!(late, Ok(None)));
+    }
+
+    // Only stream errors are remembered: DATA on a never-opened stream stays a
+    // connection error, even when repeated.
+    #[test]
+    fn data_on_an_idle_stream_is_never_ignored() {
+        let mut assembler = Assembler::new();
+
+        let first = assembler.on_frame(&data(5, Flags::END_STREAM, b"hi"));
+        let second = assembler.on_frame(&data(5, Flags::END_STREAM, b"hi"));
+
+        assert!(matches!(first, Err(AssembleError::InvalidStreamId)));
+        assert!(matches!(second, Err(AssembleError::InvalidStreamId)));
     }
 
     // --- Malformed requests (RFC 9113 §8.1.1, §8.2, §8.3.1): stream errors ---

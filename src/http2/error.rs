@@ -1,15 +1,12 @@
 // Error signalling (RFC 9113 §5.4, §6.4, §6.8, §7).
 //
-// API expected by the tests below:
-//
-// - `ErrorCode` (Debug, Clone, Copy, PartialEq): the 14 codes of §7 plus
-//   `Unknown(u32)`, with `From<u32> for ErrorCode` and `From<ErrorCode> for u32`.
-// - `rst_stream(stream_id: u32, code: ErrorCode) -> Frame`
-// - `parse_rst_stream(payload: &[u8]) -> Result<ErrorCode, PayloadError>`
-// - `goaway(last_stream_id: u32, code: ErrorCode, debug_data: &[u8]) -> Frame`
-// - `GoAway { last_stream_id: u32, error_code: ErrorCode, debug_data: Vec<u8> }`
-//   (Debug, PartialEq) with `GoAway::parse(payload: &[u8]) -> Result<GoAway, PayloadError>`
-// - `PayloadError::Length` (thiserror, Debug, PartialEq): maps to FRAME_SIZE_ERROR in 8.3.
+// - `ErrorCode`: the 32-bit codes shared by RST_STREAM and GOAWAY. Unknown
+//   codes keep their value and carry no special meaning (§7).
+// - RST_STREAM (§6.4): stream error, cancels one stream, the connection goes on.
+// - GOAWAY (§6.8): connection error or shutdown, tells the peer the last
+//   stream that was (or may be) processed; streams above it are safe to retry.
+// - Conversions from the module errors (`SettingsError`, `PayloadError`) to
+//   the code sent to the peer.
 
 use crate::http2::{
     frame::{Flags, Frame, FrameType},
@@ -22,6 +19,12 @@ const RESERVED_BIT_MASK: u32 = 0x7FFF_FFFF;
 pub enum PayloadError {
     #[error("Length")]
     Length,
+}
+
+impl From<PayloadError> for ErrorCode {
+    fn from(_: PayloadError) -> Self {
+        Self::FrameSizeError
+    }
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -51,18 +54,17 @@ pub struct GoAway {
 }
 
 impl GoAway {
-    pub fn parse(debug: &[u8]) -> Result<GoAway, PayloadError> {
-        if debug.len() < 8 {
+    pub fn parse(payload: &[u8]) -> Result<GoAway, PayloadError> {
+        let Some((id_bytes, rest)) = payload.split_first_chunk::<4>() else {
             return Err(PayloadError::Length);
-        }
+        };
 
-        let id = u32::from_be_bytes(
-            <[u8; 4]>::try_from(&debug[0..4]).map_err(|_| PayloadError::Length)?,
-        ) & &RESERVED_BIT_MASK;
-        let error_code = ErrorCode::from(u32::from_be_bytes(
-            <[u8; 4]>::try_from(&debug[4..8]).map_err(|_| PayloadError::Length)?,
-        ));
-        let debug_data = &debug[8..];
+        let Some((error_bytes, debug_data)) = rest.split_first_chunk::<4>() else {
+            return Err(PayloadError::Length);
+        };
+
+        let id = u32::from_be_bytes(*id_bytes) & RESERVED_BIT_MASK;
+        let error_code = ErrorCode::from(u32::from_be_bytes(*error_bytes));
 
         Ok(GoAway {
             last_stream_id: id,
@@ -83,7 +85,7 @@ impl From<SettingsError> for ErrorCode {
     }
 }
 
-fn rst_stream(stream_id: u32, code: ErrorCode) -> Frame {
+pub fn rst_stream(stream_id: u32, code: ErrorCode) -> Frame {
     Frame::new(
         FrameType::RstStream,
         Flags::empty(),
@@ -91,7 +93,7 @@ fn rst_stream(stream_id: u32, code: ErrorCode) -> Frame {
         u32::from(code).to_be_bytes(),
     )
 }
-fn parse_rst_stream(payload: &[u8]) -> Result<ErrorCode, PayloadError> {
+pub fn parse_rst_stream(payload: &[u8]) -> Result<ErrorCode, PayloadError> {
     let byte = <[u8; 4]>::try_from(payload).map_err(|_| PayloadError::Length)?;
     let code = u32::from_be_bytes(byte);
 
@@ -102,13 +104,13 @@ pub fn goaway(last: u32, code: ErrorCode, debug: &[u8]) -> Frame {
     let mut payload = vec![];
 
     // removing R bit
-    let id = last & &RESERVED_BIT_MASK;
+    let id = last & RESERVED_BIT_MASK;
 
     payload.extend_from_slice(id.to_be_bytes().as_slice());
     payload.extend_from_slice(u32::from(code).to_be_bytes().as_slice());
     payload.extend_from_slice(debug);
 
-    Frame::new(FrameType::GoAway, Flags::empty(), 0, payload.as_slice())
+    Frame::new(FrameType::GoAway, Flags::empty(), 0, payload)
 }
 
 impl From<u32> for ErrorCode {
@@ -216,7 +218,7 @@ mod test {
 
         assert_eq!(frame.frame_type(), FrameType::RstStream);
         assert_eq!(frame.flags(), Flags::empty()); // §6.4: no flags defined
-        assert_eq!(frame.stream_id(), &1);
+        assert_eq!(frame.stream_id(), 1);
     }
 
     #[test]
@@ -288,7 +290,7 @@ mod test {
 
         assert_eq!(frame.frame_type(), FrameType::GoAway);
         assert_eq!(frame.flags(), Flags::empty());
-        assert_eq!(frame.stream_id(), &0);
+        assert_eq!(frame.stream_id(), 0);
     }
 
     #[test]

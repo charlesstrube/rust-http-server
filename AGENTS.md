@@ -87,11 +87,11 @@ HTTP/2 (own roadmap, one file per step in `roadmap/`)
 - [x] 1. Detect the protocol from the connection preface
 - [x] 2. Frame layer: read/write the 9-byte header and payload
 - [x] 3. Connection setup: SETTINGS exchange, PING, GOAWAY
-- [ ] 4. HPACK decoder: integers, strings, static table, dynamic table, Huffman
-- [ ] 5. HPACK encoder (minimal: literal without indexing, no Huffman)
-- [ ] 6. Assemble a request: HEADERS + CONTINUATION, pseudo-headers, DATA until END_STREAM
-- [ ] 7. Send a response: HEADERS + DATA (first end-to-end milestone with curl)
-- [ ] 8. Errors: `ErrorCode`, RST_STREAM vs GOAWAY
+- [x] 4. HPACK decoder: integers, strings, static table, dynamic table, Huffman
+- [x] 5. HPACK encoder (minimal: literal without indexing, no Huffman)
+- [x] 6. Assemble a request: HEADERS + CONTINUATION, pseudo-headers, DATA until END_STREAM
+- [x] 7. Send a response: HEADERS + DATA (first end-to-end milestone with curl)
+- [x] 8. Errors: `ErrorCode`, RST_STREAM vs GOAWAY
 - [ ] 9. Flow control: connection and stream windows, WINDOW_UPDATE
 - [ ] 10. Real multiplexing: reader thread, handler per stream, single writer
 - [ ] Bonus: TLS + ALPN (`rustls`), full `h2spec` conformance

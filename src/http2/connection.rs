@@ -1,5 +1,5 @@
 use crate::http2::{
-    error::ErrorCode,
+    error::{ErrorCode, GoAway},
     frame::{Flags, Frame, FrameType},
     settings::Settings,
 };
@@ -38,7 +38,7 @@ pub enum Decision {
 
 pub fn handle_frame(frame: Frame, peer_settings: &mut Settings) -> Decision {
     match frame.frame_type() {
-        FrameType::Settings if frame.stream_id() != &0 => Decision::Close(ErrorCode::ProtocolError),
+        FrameType::Settings if frame.stream_id() != 0 => Decision::Close(ErrorCode::ProtocolError),
         FrameType::Settings
             if frame.flags().contains(Flags::ACK) && !frame.payload().is_empty() =>
         {
@@ -49,11 +49,15 @@ pub fn handle_frame(frame: Frame, peer_settings: &mut Settings) -> Decision {
             Decision::Close(error.into())
         }
         FrameType::Settings => Decision::Reply(Frame::new(FrameType::Settings, Flags::ACK, 0, [])),
-        FrameType::Ping if frame.stream_id() != &0 => Decision::Close(ErrorCode::ProtocolError),
+        FrameType::Ping if frame.stream_id() != 0 => Decision::Close(ErrorCode::ProtocolError),
         FrameType::Ping if frame.payload().len() != 8 => Decision::Close(ErrorCode::FrameSizeError),
         FrameType::Ping if frame.flags().contains(Flags::ACK) => Decision::Continue,
         FrameType::Ping => {
             Decision::Reply(Frame::new(FrameType::Ping, Flags::ACK, 0, frame.payload()))
+        }
+        FrameType::GoAway if frame.stream_id() != 0 => Decision::Close(ErrorCode::ProtocolError),
+        FrameType::GoAway if let Err(error) = GoAway::parse(frame.payload()) => {
+            Decision::Close(error.into())
         }
         FrameType::GoAway => Decision::Close(ErrorCode::NoError),
         FrameType::Unknown(_) => Decision::Continue,

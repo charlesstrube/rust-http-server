@@ -3,6 +3,8 @@ use std::{
     ops::{BitOr, BitOrAssign},
 };
 
+use crate::http2::error::ErrorCode;
+
 pub(crate) const DEFAULT_MAX_FRAME_SIZE: u32 = 16_384;
 const MAX_FRAME_LENGTH: usize = 0xFF_FFFF;
 
@@ -99,6 +101,15 @@ pub enum FrameError {
     Io(String),
 }
 
+impl FrameError {
+    pub fn code(&self) -> Option<ErrorCode> {
+        match self {
+            Self::TooLarge { .. } => Some(ErrorCode::FrameSizeError),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, PartialEq)]
 struct FrameHeader {
     length: u32,
@@ -193,8 +204,8 @@ impl Frame {
         self.flags
     }
 
-    pub fn stream_id(&self) -> &u32 {
-        &self.stream_id
+    pub fn stream_id(&self) -> u32 {
+        self.stream_id
     }
 
     pub fn payload(&self) -> &[u8] {

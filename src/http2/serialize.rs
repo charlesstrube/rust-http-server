@@ -307,7 +307,7 @@ mod test {
     fn every_frame_carries_the_stream_id() {
         let frames = serialize_response(7, text_plain("abc"), MAX);
 
-        assert!(frames.iter().all(|frame| *frame.stream_id() == 7));
+        assert!(frames.iter().all(|frame| frame.stream_id() == 7));
     }
 
     // The walk-through example, byte for byte, with the minimal step 5 encoder.

@@ -1442,3 +1442,87 @@ fn truncated_preface_closes_without_response() {
     assert_eq!(connection.read_until_closed(), b"");
     assert_eq!(get("/echo/alive"), text_plain_200("alive"));
 }
+
+// --- Lingering close: the last frame must reach the client -------------------
+//
+// Closing a socket whose receive buffer still holds unread bytes makes the
+// kernel send a TCP RST instead of a FIN (RFC 1122 §4.2.2.13). Depending on
+// timing, the RST can destroy data not yet delivered to the client: the
+// GOAWAY (or the 400) is lost. The server must shut down its write side, then
+// read and discard what the client still sends before closing.
+//
+// The loss is a race (about 1 connection in 10 on macOS loopback), so each test
+// replays the scenario on many connections: with the bug, at least one is
+// almost certainly lost; once fixed, none is.
+
+const LINGERING_ATTEMPTS: usize = 60;
+
+// About 34 KB of valid frames the server will never process.
+fn unread_h2_pings() -> Vec<u8> {
+    h2_frame(0x6, 0x0, 0, &[0; 8]).repeat(2_000)
+}
+
+fn h2_frame(frame_type: u8, flags: u8, stream_id: u32, payload: &[u8]) -> Vec<u8> {
+    let mut frame = (payload.len() as u32).to_be_bytes()[1..].to_vec();
+    frame.extend_from_slice(&[frame_type, flags]);
+    frame.extend_from_slice(&stream_id.to_be_bytes());
+    frame.extend_from_slice(payload);
+    frame
+}
+
+// Sends `request` in a single write, lets the server hit its error and close,
+// then half-closes like a client that is done. Returns everything that arrived
+// before the end of the connection, whether it ended with a FIN or a RST.
+fn send_then_collect(request: &[u8]) -> Vec<u8> {
+    let mut stream = connect();
+    stream.write_all(request).unwrap();
+
+    thread::sleep(Duration::from_millis(50));
+    // The connection may already be reset: that is the bug under test, not a test failure.
+    let _ = stream.shutdown(Shutdown::Write);
+
+    let mut received = Vec::new();
+    let mut chunk = [0; 4096];
+    loop {
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => received.extend_from_slice(&chunk[..read]),
+            Err(err) if err.kind() == std::io::ErrorKind::ConnectionReset => break,
+            Err(err) => panic!("server did not close the connection in time: {err}"),
+        }
+    }
+    received
+}
+
+fn assert_never_lost(request: &[u8], expected: &[u8]) {
+    let lost = (0..LINGERING_ATTEMPTS)
+        .filter(|_| send_then_collect(request) != expected)
+        .count();
+
+    assert_eq!(
+        lost, 0,
+        "the last bytes were lost on {lost}/{LINGERING_ATTEMPTS} connections"
+    );
+}
+
+// PING on stream 1 is a connection error (RFC 9113 §6.7): GOAWAY(0, PROTOCOL_ERROR).
+#[test]
+fn h2_goaway_survives_unread_client_frames() {
+    let _server = Server::start();
+    let request = [
+        H2_PREFACE.as_bytes(),
+        &H2_EMPTY_SETTINGS,
+        &h2_frame(0x6, 0x0, 1, &[0; 8]),
+        &unread_h2_pings(),
+    ]
+    .concat();
+
+    #[rustfmt::skip]
+    let goaway = h2_frame(0x7, 0x0, 0, &[
+        0x00, 0x00, 0x00, 0x00, // last stream id = 0
+        0x00, 0x00, 0x00, 0x01, // PROTOCOL_ERROR
+    ]);
+    let expected = [&H2_EMPTY_SETTINGS[..], &H2_SETTINGS_ACK, &goaway].concat();
+
+    assert_never_lost(&request, &expected);
+}
