@@ -1,6 +1,7 @@
 pub mod assembler;
 pub mod connection;
 pub mod error;
+pub mod flow;
 pub mod frame;
 pub mod hpack;
 pub mod serialize;
