@@ -13,7 +13,7 @@ use crate::http2::{
     settings::SettingsError,
 };
 
-const RESERVED_BIT_MASK: u32 = 0x7FFF_FFFF;
+pub const RESERVED_BIT_MASK: u32 = 0x7FFF_FFFF;
 
 #[derive(Debug, PartialEq, thiserror::Error)]
 pub enum PayloadError {

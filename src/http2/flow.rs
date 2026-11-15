@@ -1,4 +1,8 @@
-use crate::http2::{error::ErrorCode, frame::Frame};
+use crate::http2::{
+    error::{ErrorCode, RESERVED_BIT_MASK},
+    frame::{Flags, Frame, FrameType::WindowUpdate},
+    hpack::integer::{decode_integer, encode_integer},
+};
 
 // Flow control (RFC 9113 §5.2, §6.9).
 //
@@ -52,7 +56,10 @@ pub enum FlowError {
 impl From<FlowError> for ErrorCode {
     fn from(value: FlowError) -> Self {
         match value {
-            _ => Self::ConnectError,
+            FlowError::Length => Self::FrameSizeError,
+            FlowError::ZeroIncrement => Self::ProtocolError,
+            FlowError::Overflow => Self::FlowControlError,
+            FlowError::Exceeded => Self::FlowControlError,
         }
     }
 }
@@ -77,10 +84,8 @@ impl Window {
 
     pub fn available(&self) -> u32 {
         if self.size.is_negative() {
-            println!("1");
             0
         } else {
-            println!("2");
             u32::try_from(self.size).unwrap_or_default()
         }
     }
@@ -124,12 +129,23 @@ impl Window {
     }
 }
 
-fn parse_window_update(payload: &[u8]) -> Result<u32, FlowError> {
-    todo!()
+pub fn parse_window_update(payload: &[u8]) -> Result<u32, FlowError> {
+    let bytes = <[u8; 4]>::try_from(payload).map_err(|_| FlowError::Length)?;
+    let raw = u32::from_be_bytes(bytes);
+
+    let increment = raw & RESERVED_BIT_MASK;
+
+    if increment == 0 {
+        return Err(FlowError::ZeroIncrement);
+    }
+
+    Ok(increment)
 }
 
-fn window_update(stream_id: u32, increment: u32) -> Frame {
-    todo!()
+pub fn window_update(stream_id: u32, increment: u32) -> Frame {
+    let test = increment & RESERVED_BIT_MASK;
+
+    Frame::new(WindowUpdate, Flags::empty(), stream_id, test.to_be_bytes())
 }
 
 #[cfg(test)]
