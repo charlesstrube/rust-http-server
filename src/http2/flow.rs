@@ -1,7 +1,8 @@
+use std::{cmp::min, collections::VecDeque};
+
 use crate::http2::{
     error::{ErrorCode, RESERVED_BIT_MASK},
-    frame::{Flags, Frame, FrameType::WindowUpdate},
-    hpack::integer::{decode_integer, encode_integer},
+    frame::{Flags, Frame, FrameType},
 };
 
 // Flow control (RFC 9113 §5.2, §6.9).
@@ -30,6 +31,31 @@ use crate::http2::{
 // - `parse_window_update(payload: &[u8]) -> Result<u32, FlowError>`: `Length` when
 //   the payload is not 4 bytes, `ZeroIncrement` when the increment is 0 (after
 //   ignoring the reserved bit).
+//
+// 9.3 SendQueue: the response bodies waiting for credit (§5.2, §6.9.1)
+//
+// HEADERS are not flow-controlled: `serve` writes them at once (see
+// `serialize::serialize_head`) and hands the body to the queue. The queue owns
+// the connection window and one window per queued stream.
+//
+// - `SendQueue` (Default = `SendQueue::new()`): connection window 65 535,
+//   initial stream window 65 535.
+//   - `push(&mut self, stream_id: u32, body: Vec<u8>)`: queue a body, sends nothing.
+//     The stream window starts at the current initial window size. An empty body
+//     is ignored: END_STREAM is already on HEADERS.
+//   - `poll(&mut self, max_frame_size: u32) -> Vec<Frame>`: every DATA frame the
+//     windows allow now. Each frame is `min(max_frame_size, connection window,
+//     stream window, rest of the body)` long, END_STREAM on the last one, never
+//     an empty frame. Streams are served in push order, but a stream blocked by
+//     its own window does not block the next ones.
+//   - `is_empty(&self) -> bool`: nothing left to send.
+//   - `increase(&mut self, stream_id: u32, increment: u32) -> Result<(), FlowError>`:
+//     a WINDOW_UPDATE received. Stream 0 = connection. A stream with nothing
+//     queued (finished, or response not ready yet) is ignored: being too
+//     cautious never breaks the protocol.
+//   - `set_initial_window(&mut self, size: u32) -> Result<(), FlowError>`: a new
+//     SETTINGS_INITIAL_WINDOW_SIZE. Shifts every queued stream by
+//     `size - previous size`, never the connection window (§6.9.2).
 //
 // Errors
 //
@@ -145,7 +171,144 @@ pub fn parse_window_update(payload: &[u8]) -> Result<u32, FlowError> {
 pub fn window_update(stream_id: u32, increment: u32) -> Frame {
     let test = increment & RESERVED_BIT_MASK;
 
-    Frame::new(WindowUpdate, Flags::empty(), stream_id, test.to_be_bytes())
+    Frame::new(
+        FrameType::WindowUpdate,
+        Flags::empty(),
+        stream_id,
+        test.to_be_bytes(),
+    )
+}
+#[derive(Debug)]
+struct Pending {
+    stream_id: u32, // pour les frames DATA et pour retrouver l'entrée dans increase
+    window: Window, // fenêtre propre à ce stream
+    body: Vec<u8>,  // le body complet
+    sent: usize,    // combien d'octets sont déjà partis
+}
+
+impl Pending {
+    pub fn remaining(&self) -> &[u8] {
+        &self.body[self.sent..]
+    }
+    pub fn is_done(&self) -> bool {
+        self.body.len() == self.sent
+    }
+    pub fn increase(&mut self, length: usize) {
+        self.sent += length;
+    }
+}
+
+#[derive(Debug)]
+pub struct SendQueue {
+    connection: Window,         // fenêtre de connexion, 65 535 au départ
+    initial_window: u32,        // dernière valeur de SETTINGS_INITIAL_WINDOW_SIZE
+    pending: VecDeque<Pending>, // envois en attente,
+}
+
+impl Default for SendQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SendQueue {
+    pub fn new() -> Self {
+        Self {
+            connection: Window::default(),
+            initial_window: DEFAULT_WINDOW_SIZE,
+            pending: VecDeque::new(),
+        }
+    }
+
+    pub fn push(&mut self, stream_id: u32, body: Vec<u8>) {
+        if body.is_empty() {
+            return;
+        }
+        self.pending.push_back(Pending {
+            stream_id,
+            body,
+            sent: 0,
+            window: Window::new(self.initial_window),
+        })
+    }
+
+    pub fn poll(&mut self, max_frame_size: u32) -> Vec<Frame> {
+        let mut frames = Vec::new();
+        for pending in self.pending.iter_mut() {
+            while !pending.is_done() {
+                let first = min(
+                    max_frame_size as usize,
+                    self.connection.available() as usize,
+                );
+                let second = min(
+                    pending.window.available() as usize,
+                    pending.remaining().len(),
+                );
+                let length = min(first, second);
+
+                if length == 0 {
+                    break;
+                }
+
+                if self.connection.consume(length as u32).is_err() {
+                    break;
+                };
+                if pending.window.consume(length as u32).is_err() {
+                    break;
+                };
+
+                let remaining = pending.remaining()[..length].to_vec();
+
+                pending.increase(length);
+
+                let flags = if pending.is_done() {
+                    Flags::END_STREAM
+                } else {
+                    Flags::empty()
+                };
+
+                frames.push(Frame::new(
+                    FrameType::Data,
+                    flags,
+                    pending.stream_id,
+                    remaining,
+                ));
+            }
+        }
+
+        self.pending.retain(|p| !p.is_done());
+
+        frames
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.pending.is_empty()
+    }
+
+    pub fn increase(&mut self, stream_id: u32, increment: u32) -> Result<(), FlowError> {
+        if stream_id == 0 {
+            self.connection.increase(increment)?;
+        } else {
+            for pending in self.pending.iter_mut() {
+                if pending.stream_id == stream_id {
+                    pending.window.increase(increment)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn set_initial_window(&mut self, size: u32) -> Result<(), FlowError> {
+        let delta = i64::from(size) - i64::from(self.initial_window);
+
+        for pending in self.pending.iter_mut() {
+            pending.window.apply_delta(delta)?;
+        }
+        self.initial_window = size;
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -468,6 +631,397 @@ mod test {
                 ErrorCode::from(FlowError::Exceeded),
                 ErrorCode::FlowControlError
             );
+        }
+    }
+
+    // 9.3: cargo test flow::test::send_queue::
+    mod send_queue {
+        use super::*;
+        use crate::http2::frame::Frame;
+
+        const MAX: u32 = 16_384;
+
+        // Non-UTF-8 bytes on purpose, like a file or a gzipped body.
+        fn body(len: usize) -> Vec<u8> {
+            (0..len).map(|i| (i % 251) as u8).collect()
+        }
+
+        // (stream id, payload length) of each frame, checking they are all DATA.
+        fn sizes(frames: &[Frame]) -> Vec<(u32, usize)> {
+            frames
+                .iter()
+                .map(|frame| {
+                    assert_eq!(frame.frame_type(), FrameType::Data);
+                    (frame.stream_id(), frame.payload().len())
+                })
+                .collect()
+        }
+
+        fn ends_stream(frame: &Frame) -> bool {
+            frame.flags().contains(Flags::END_STREAM)
+        }
+
+        // Which frames carry END_STREAM, in order.
+        fn ends(frames: &[Frame]) -> Vec<bool> {
+            frames.iter().map(ends_stream).collect()
+        }
+
+        fn sent(frames: &[Frame]) -> Vec<u8> {
+            frames
+                .iter()
+                .flat_map(|frame| frame.payload().to_vec())
+                .collect()
+        }
+
+        fn total(frames: &[Frame]) -> usize {
+            frames.iter().map(|frame| frame.payload().len()).sum()
+        }
+
+        // A 100 000-byte body on stream 1, polled once: both windows are at 0.
+        fn exhausted() -> SendQueue {
+            let mut queue = SendQueue::new();
+            queue.push(1, body(100_000));
+            assert_eq!(total(&queue.poll(MAX)), 65_535);
+            queue
+        }
+
+        // --- Pushing and polling ---
+
+        #[test]
+        fn new_queue_is_empty() {
+            let mut queue = SendQueue::new();
+
+            assert!(queue.is_empty());
+            assert_eq!(queue.poll(MAX), vec![]);
+        }
+
+        #[test]
+        fn default_is_new() {
+            let mut queue = SendQueue::default();
+            queue.push(1, body(100_000));
+
+            assert_eq!(total(&queue.poll(MAX)), 65_535);
+        }
+
+        // Sending happens in poll only.
+        #[test]
+        fn push_sends_nothing() {
+            let mut queue = SendQueue::new();
+
+            queue.push(1, b"abc".to_vec());
+
+            assert!(!queue.is_empty());
+        }
+
+        #[test]
+        fn small_body_is_one_data_frame_that_ends_the_stream() {
+            let mut queue = SendQueue::new();
+            queue.push(1, b"abc".to_vec());
+
+            let frames = queue.poll(MAX);
+
+            assert_eq!(frames.len(), 1);
+            assert_eq!(frames[0].frame_type(), FrameType::Data);
+            assert_eq!(frames[0].stream_id(), 1);
+            assert_eq!(frames[0].flags(), Flags::END_STREAM);
+            assert_eq!(frames[0].payload(), b"abc");
+            assert!(queue.is_empty());
+        }
+
+        // END_STREAM is already on HEADERS: no empty DATA frame afterwards.
+        #[test]
+        fn empty_body_is_ignored() {
+            let mut queue = SendQueue::new();
+
+            queue.push(1, vec![]);
+
+            assert!(queue.is_empty());
+            assert_eq!(queue.poll(MAX), vec![]);
+        }
+
+        #[test]
+        fn nothing_is_sent_twice() {
+            let mut queue = SendQueue::new();
+            queue.push(1, b"abc".to_vec());
+            queue.poll(MAX);
+
+            assert_eq!(queue.poll(MAX), vec![]);
+        }
+
+        // --- Frame size (RFC 9113 §4.2) ---
+
+        // 40_000 = 16_384 + 16_384 + 7_232, END_STREAM only on the last one.
+        #[test]
+        fn body_is_split_at_max_frame_size() {
+            let mut queue = SendQueue::new();
+            queue.push(1, body(40_000));
+
+            let frames = queue.poll(MAX);
+
+            assert_eq!(sizes(&frames), vec![(1, 16_384), (1, 16_384), (1, 7_232)]);
+            assert_eq!(ends(&frames), vec![false, false, true]);
+            assert_eq!(sent(&frames), body(40_000));
+        }
+
+        // The peer's SETTINGS_MAX_FRAME_SIZE can change: it is given at each poll.
+        #[test]
+        fn uses_the_given_max_frame_size() {
+            let mut queue = SendQueue::new();
+            queue.push(1, body(40_000));
+
+            assert_eq!(sizes(&queue.poll(32_768)), vec![(1, 32_768), (1, 7_232)]);
+        }
+
+        // A body of exactly the window: everything goes, the last frame is cut to 16 383.
+        #[test]
+        fn body_of_exactly_the_window_is_sent_entirely() {
+            let mut queue = SendQueue::new();
+            queue.push(1, body(65_535));
+
+            let frames = queue.poll(MAX);
+
+            assert_eq!(
+                sizes(&frames),
+                vec![(1, 16_384), (1, 16_384), (1, 16_384), (1, 16_383)]
+            );
+            assert_eq!(ends(&frames), vec![false, false, false, true]);
+            assert!(queue.is_empty());
+        }
+
+        // A stream window smaller than a frame cuts the frame.
+        #[test]
+        fn frame_is_cut_by_the_stream_window() {
+            let mut queue = SendQueue::new();
+            queue.set_initial_window(1_000).unwrap();
+            queue.push(1, body(5_000));
+
+            let frames = queue.poll(MAX);
+
+            assert_eq!(sizes(&frames), vec![(1, 1_000)]);
+            assert_eq!(ends(&frames), vec![false]);
+        }
+
+        // --- Blocking and resuming: the scenario of the explanation ---
+
+        #[test]
+        fn sending_stops_when_the_windows_are_empty() {
+            let mut queue = SendQueue::new();
+            queue.push(1, body(100_000));
+
+            let frames = queue.poll(MAX);
+
+            assert_eq!(
+                sizes(&frames),
+                vec![(1, 16_384), (1, 16_384), (1, 16_384), (1, 16_383)]
+            );
+            assert_eq!(ends(&frames), vec![false, false, false, false]);
+            assert!(!queue.is_empty());
+            assert_eq!(queue.poll(MAX), vec![]);
+        }
+
+        // Connection credit alone: the stream window is still at 0.
+        #[test]
+        fn connection_credit_alone_does_not_unblock_a_stream() {
+            let mut queue = exhausted();
+
+            queue.increase(0, 65_535).unwrap();
+
+            assert_eq!(queue.poll(MAX), vec![]);
+        }
+
+        // Stream credit alone: the connection window is still at 0.
+        #[test]
+        fn stream_credit_alone_does_not_unblock_a_stream() {
+            let mut queue = exhausted();
+
+            queue.increase(1, 65_535).unwrap();
+
+            assert_eq!(queue.poll(MAX), vec![]);
+        }
+
+        // 100 000 - 65 535 = 34 465 = 16 384 + 16 384 + 1 697.
+        #[test]
+        fn both_credits_resume_the_stream() {
+            let mut queue = SendQueue::new();
+            queue.push(1, body(100_000));
+            let mut frames = queue.poll(MAX);
+
+            queue.increase(0, 65_535).unwrap();
+            queue.increase(1, 65_535).unwrap();
+            let rest = queue.poll(MAX);
+
+            assert_eq!(sizes(&rest), vec![(1, 16_384), (1, 16_384), (1, 1_697)]);
+            assert_eq!(ends(&rest), vec![false, false, true]);
+            assert!(queue.is_empty());
+
+            frames.extend(rest);
+            assert_eq!(sent(&frames), body(100_000));
+        }
+
+        // Credit is used up exactly: a small increment sends a small frame.
+        #[test]
+        fn small_credit_sends_a_small_frame() {
+            let mut queue = exhausted();
+
+            queue.increase(0, 10).unwrap();
+            queue.increase(1, 10).unwrap();
+
+            assert_eq!(sizes(&queue.poll(MAX)), vec![(1, 10)]);
+            assert_eq!(queue.poll(MAX), vec![]);
+        }
+
+        // --- Several streams (RFC 9113 §5.2.1) ---
+
+        // The connection window is shared: 40 000 + 25 535 = 65 535.
+        #[test]
+        fn streams_share_the_connection_window() {
+            let mut queue = SendQueue::new();
+            queue.push(1, body(40_000));
+            queue.push(3, body(40_000));
+
+            let frames = queue.poll(MAX);
+
+            assert_eq!(
+                sizes(&frames),
+                vec![
+                    (1, 16_384),
+                    (1, 16_384),
+                    (1, 7_232),
+                    (3, 16_384),
+                    (3, 9_151)
+                ]
+            );
+            assert_eq!(ends(&frames), vec![false, false, true, false, false]);
+
+            queue.increase(0, 14_465).unwrap();
+            let rest = queue.poll(MAX);
+
+            assert_eq!(sizes(&rest), vec![(3, 14_465)]);
+            assert_eq!(ends(&rest), vec![true]);
+            assert!(queue.is_empty());
+        }
+
+        #[test]
+        fn streams_are_served_in_push_order() {
+            let mut queue = SendQueue::new();
+            queue.push(3, b"abc".to_vec());
+            queue.push(1, b"def".to_vec());
+
+            let frames = queue.poll(MAX);
+
+            assert_eq!(sizes(&frames), vec![(3, 3), (1, 3)]);
+            assert_eq!(ends(&frames), vec![true, true]);
+        }
+
+        // The whole point of per-stream windows: stream 1 waits, stream 3 goes.
+        #[test]
+        fn a_blocked_stream_does_not_block_the_others() {
+            let mut queue = exhausted();
+            queue.increase(0, 100_000).unwrap();
+
+            queue.push(3, b"abc".to_vec());
+            let frames = queue.poll(MAX);
+
+            assert_eq!(sizes(&frames), vec![(3, 3)]);
+            assert_eq!(ends(&frames), vec![true]);
+            assert!(!queue.is_empty()); // stream 1 still waits
+        }
+
+        // --- WINDOW_UPDATE (RFC 9113 §6.9) ---
+
+        // The response may not be queued yet, or the stream is already finished.
+        #[test]
+        fn credit_for_a_stream_without_queued_body_is_ignored() {
+            let mut queue = SendQueue::new();
+
+            assert_eq!(queue.increase(5, 100), Ok(()));
+            assert!(queue.is_empty());
+        }
+
+        // §6.9: a WINDOW_UPDATE can arrive just after END_STREAM was sent.
+        #[test]
+        fn credit_for_a_finished_stream_is_ignored() {
+            let mut queue = SendQueue::new();
+            queue.push(1, b"abc".to_vec());
+            queue.poll(MAX);
+
+            assert_eq!(queue.increase(1, 10), Ok(()));
+            assert_eq!(queue.poll(MAX), vec![]);
+        }
+
+        // 65 535 + 2^31 - 1 > 2^31 - 1.
+        #[test]
+        fn connection_window_overflow_is_an_error() {
+            let mut queue = SendQueue::new();
+
+            assert_eq!(queue.increase(0, MAX_WINDOW_SIZE), Err(FlowError::Overflow));
+        }
+
+        #[test]
+        fn stream_window_overflow_is_an_error() {
+            let mut queue = SendQueue::new();
+            queue.push(1, b"abc".to_vec());
+
+            assert_eq!(queue.increase(1, MAX_WINDOW_SIZE), Err(FlowError::Overflow));
+        }
+
+        // --- SETTINGS_INITIAL_WINDOW_SIZE (RFC 9113 §6.9.2) ---
+
+        // The example of the explanation: the stream window falls to -49 151.
+        #[test]
+        fn lower_initial_window_pushes_a_queued_stream_below_zero() {
+            let mut queue = exhausted();
+            queue.increase(0, 100_000).unwrap();
+
+            queue.set_initial_window(16_384).unwrap();
+            queue.increase(1, 49_151).unwrap();
+            assert_eq!(queue.poll(MAX), vec![]);
+
+            queue.increase(1, 1).unwrap();
+            assert_eq!(sizes(&queue.poll(MAX)), vec![(1, 1)]);
+        }
+
+        // 0 + (85 535 - 65 535) = 20 000 = 16 384 + 3 616.
+        #[test]
+        fn higher_initial_window_unblocks_a_queued_stream() {
+            let mut queue = exhausted();
+            queue.increase(0, 100_000).unwrap();
+
+            queue.set_initial_window(85_535).unwrap();
+
+            assert_eq!(sizes(&queue.poll(MAX)), vec![(1, 16_384), (1, 3_616)]);
+        }
+
+        // The shift is computed from the previous setting, not from 65 535.
+        #[test]
+        fn successive_settings_shift_from_the_previous_value() {
+            let mut queue = SendQueue::new();
+            queue.push(1, body(10_000));
+
+            queue.set_initial_window(1_000).unwrap();
+            queue.set_initial_window(3_000).unwrap();
+
+            assert_eq!(sizes(&queue.poll(MAX)), vec![(1, 3_000)]);
+        }
+
+        // §6.9.2: only stream windows move; the connection window stays at 65 535.
+        #[test]
+        fn initial_window_does_not_change_the_connection_window() {
+            let mut queue = SendQueue::new();
+            queue.set_initial_window(100_000).unwrap();
+            queue.push(1, body(200_000));
+
+            assert_eq!(total(&queue.poll(MAX)), 65_535);
+        }
+
+        // §6.9.2: a change that makes a stream window exceed 2^31 - 1 is a FLOW_CONTROL_ERROR.
+        #[test]
+        fn initial_window_overflow_is_an_error() {
+            let mut queue = SendQueue::new();
+            queue.push(1, b"abc".to_vec());
+            queue.increase(1, MAX_WINDOW_SIZE - 65_535).unwrap();
+
+            assert_eq!(queue.set_initial_window(65_536), Err(FlowError::Overflow));
         }
     }
 }

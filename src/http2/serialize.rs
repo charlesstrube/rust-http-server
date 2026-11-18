@@ -1,5 +1,5 @@
 use crate::{
-    http::{headers::Headers, response::Response},
+    http::{headers::Headers, response::Response, status::StatusCode},
     http2::{
         frame::{Flags, Frame, FrameType},
         hpack::encoder::encode,
@@ -17,6 +17,15 @@ use crate::{
 // - Connection-specific headers are dropped (§8.2.2); `content-length` is set from the final body.
 // - HEADERS (+ CONTINUATION if the block is too large), then DATA chunks of at most `max_frame_size`.
 // - END_STREAM is on the last frame of the stream: HEADERS if the body is empty, else the last DATA.
+//
+// Step 9.3: DATA frames are now cut by the flow-control windows (`flow::SendQueue`),
+// so the head is serialized on its own:
+//
+//     pub fn serialize_head(stream_id: u32, response: Response, max_frame_size: u32) -> (Vec<Frame>, Vec<u8>)
+//
+// - Returns the HEADERS (+ CONTINUATION) frames, exactly those of `serialize_response`,
+//   and the body untouched, to be pushed into the `SendQueue`.
+// - END_STREAM is on HEADERS when the body is empty, as before.
 
 fn encode_into_payloads(headers: Headers, payload: &mut Vec<u8>) {
     for (name, value) in headers.iter() {
@@ -36,9 +45,33 @@ fn encode_into_payloads(headers: Headers, payload: &mut Vec<u8>) {
     }
 }
 
-pub fn serialize_response(stream_id: u32, response: Response, max_frame_size: u32) -> Vec<Frame> {
-    let (status_code, mut headers, body) = response.into_parts();
+fn serialize_head(
+    stream_id: u32,
+    response: Response,
+    max_frame_size: u32,
+) -> (Vec<Frame>, Vec<u8>) {
+    let (status_code, headers, body) = response.into_parts();
+    let mut frames: Vec<Frame> = vec![];
+    get_header_frames(
+        status_code,
+        headers,
+        &body,
+        max_frame_size,
+        stream_id,
+        &mut frames,
+    );
 
+    (frames, body)
+}
+
+fn get_header_frames(
+    status_code: StatusCode,
+    mut headers: Headers,
+    body: &[u8],
+    max_frame_size: u32,
+    stream_id: u32,
+    frames: &mut Vec<Frame>,
+) {
     // pseudo headers
     let code = status_code.code().to_string();
     let bytes = encode(&[(":status".to_ascii_lowercase().as_str(), &code)]);
@@ -50,7 +83,6 @@ pub fn serialize_response(stream_id: u32, response: Response, max_frame_size: u3
 
     let header_payloads = serialized_headers.chunks(max_frame_size as usize);
     let header_frame_length = header_payloads.len();
-    let mut frames: Vec<Frame> = vec![];
 
     for (index, payload) in header_payloads.enumerate() {
         let is_first = index == 0;
@@ -72,6 +104,19 @@ pub fn serialize_response(stream_id: u32, response: Response, max_frame_size: u3
 
         frames.push(Frame::new(frame_type, flags, stream_id, payload));
     }
+}
+
+pub fn serialize_response(stream_id: u32, response: Response, max_frame_size: u32) -> Vec<Frame> {
+    let (status_code, headers, body) = response.into_parts();
+    let mut frames: Vec<Frame> = vec![];
+    get_header_frames(
+        status_code,
+        headers,
+        &body,
+        max_frame_size,
+        stream_id,
+        &mut frames,
+    );
 
     let body_payloads = body.chunks(max_frame_size as usize);
     let body_frame_length = body_payloads.len();
@@ -401,5 +446,70 @@ mod test {
         assert_eq!(frames[0].flags(), Flags::empty());
         assert_eq!(frames[1].flags(), Flags::END_HEADERS);
         assert_eq!(frames[2].flags(), Flags::END_STREAM);
+    }
+
+    // --- 9.3 Head only: the body goes to the SendQueue ---
+
+    #[test]
+    fn head_of_an_empty_body_ends_the_stream() {
+        let (frames, body) = serialize_head(1, empty(StatusCode::NotFound), MAX);
+
+        assert_eq!(types(&frames), vec![FrameType::Headers]);
+        assert_eq!(frames[0].flags(), Flags::END_HEADERS | Flags::END_STREAM);
+        assert_eq!(body, Vec::<u8>::new());
+    }
+
+    // No DATA frame at all: the queue will make them.
+    #[test]
+    fn head_keeps_the_body_apart() {
+        let payload = binary(40_000);
+        let (frames, body) = serialize_head(1, with_headers(&[], payload.clone()), MAX);
+
+        assert_eq!(types(&frames), vec![FrameType::Headers]);
+        assert_eq!(frames[0].flags(), Flags::END_HEADERS);
+        assert_eq!(body, payload);
+    }
+
+    #[test]
+    fn head_announces_the_body_length() {
+        let (frames, _) = serialize_head(1, text_plain("abc"), MAX);
+
+        assert_eq!(header(&frames, "content-length"), Some("3".into()));
+    }
+
+    #[test]
+    fn head_frames_carry_the_stream_id() {
+        let (frames, _) = serialize_head(7, text_plain("abc"), MAX);
+
+        assert!(frames.iter().all(|frame| frame.stream_id() == 7));
+    }
+
+    // CONTINUATION still follows HEADERS; END_STREAM stays off when a body follows.
+    #[test]
+    fn large_head_uses_continuation() {
+        let big = "x".repeat(20_000);
+        let response = with_headers(&[("X-Big", &big)], "abc");
+        let (frames, body) = serialize_head(1, response, MAX);
+
+        assert_eq!(
+            types(&frames),
+            vec![FrameType::Headers, FrameType::Continuation]
+        );
+        assert_eq!(frames[0].flags(), Flags::empty());
+        assert_eq!(frames[1].flags(), Flags::END_HEADERS);
+        assert_eq!(body, b"abc");
+    }
+
+    // Same head as serialize_response: only the DATA part moved.
+    #[test]
+    fn head_matches_serialize_response() {
+        let (head, _) = serialize_head(1, text_plain("abc"), MAX);
+        let full = serialize_response(1, text_plain("abc"), MAX);
+
+        let expected: Vec<Frame> = full
+            .into_iter()
+            .filter(|frame| frame.frame_type() != FrameType::Data)
+            .collect();
+        assert_eq!(head, expected);
     }
 }
