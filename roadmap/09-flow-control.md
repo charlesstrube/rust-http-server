@@ -14,7 +14,7 @@ RFC 9113 §5.2 and §6.9. Only DATA frames count, padding included.
 | 9.1 | `Window`: `new`, `available`, `consume`, `increase`, `apply_delta` (signed, max 2^31 − 1) | `src/http2/flow.rs` | written ✅ |
 | 9.2 | `window_update` / `parse_window_update`, `FlowError` → `ErrorCode` | `src/http2/flow.rs` | written ✅ |
 | 9.3 | `SendQueue` (`push`, `poll`, `increase`, `set_initial_window`) + `serialize_head` | `flow.rs`, `serialize.rs` | written ✅ |
-| 9.4 | React to `WINDOW_UPDATE` and `INITIAL_WINDOW_SIZE`, error table | `mod.rs` | |
+| 9.4 | Wire `SendQueue` into `serve`: `serialize_head` + `push` + `poll`, `WINDOW_UPDATE`, `INITIAL_WINDOW_SIZE`, `cancel` on RST_STREAM, error table | `mod.rs`, `flow.rs`, `settings.rs` | written ✅ |
 | 9.5 | Receiving: check our window, give credit back (also for ignored DATA) | `assembler.rs`, `mod.rs` | |
 | 9.6 | Integration: 100 000-byte file, raw client without WINDOW_UPDATE gets exactly 65 535 bytes, then the rest | `tests/http_server.rs` | |
 

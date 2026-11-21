@@ -1,5 +1,6 @@
 use crate::http2::{
     error::{ErrorCode, GoAway},
+    flow::parse_window_update,
     frame::{Flags, Frame, FrameType},
     settings::Settings,
 };
@@ -61,6 +62,24 @@ pub fn handle_frame(frame: Frame, peer_settings: &mut Settings) -> Decision {
         }
         FrameType::GoAway => Decision::Close(ErrorCode::NoError),
         FrameType::Unknown(_) => Decision::Continue,
+        FrameType::WindowUpdate if frame.payload().len() != 4 => {
+            Decision::Close(ErrorCode::FrameSizeError)
+        }
+        FrameType::WindowUpdate
+            if let Ok(value) = parse_window_update(frame.payload())
+                && frame.stream_id() != 0
+                && value == 0 =>
+        {
+            Decision::Close(ErrorCode::ProtocolError)
+        }
+        FrameType::WindowUpdate
+            if let Ok(value) = parse_window_update(frame.payload())
+                && frame.stream_id() == 0
+                && value == 0 =>
+        {
+            // RST_STREAM PROTOCOL_ERROR + cancel(N)
+            Decision::Close(ErrorCode::FrameSizeError)
+        }
         _ => Decision::Continue,
     }
 }

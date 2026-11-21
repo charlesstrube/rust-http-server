@@ -1,8 +1,10 @@
 use std::{cmp::min, collections::VecDeque};
 
 use crate::http2::{
+    connection::{Decision, handle_frame},
     error::{ErrorCode, RESERVED_BIT_MASK},
     frame::{Flags, Frame, FrameType},
+    settings::Settings,
 };
 
 // Flow control (RFC 9113 §5.2, §6.9).
@@ -309,6 +311,67 @@ impl SendQueue {
 
         Ok(())
     }
+
+    // 9.4: the stream is closed (RST_STREAM received or sent): drop its body.
+    pub fn cancel(&mut self, stream_id: u32) {
+        self.pending
+            .retain(|pending| pending.stream_id != stream_id);
+    }
+}
+
+pub fn on_settings(frame: Frame, peer_settings: &mut Settings, queue: &mut SendQueue) -> Decision {
+    let is_new_settings = !frame.flags().contains(Flags::ACK);
+
+    let decision = handle_frame(frame, peer_settings);
+
+    if is_new_settings
+        && matches!(decision, Decision::Reply(_))
+        && queue
+            .set_initial_window(peer_settings.initial_window_size())
+            .is_err()
+    {
+        return Decision::Close(ErrorCode::FlowControlError);
+    }
+
+    decision
+}
+
+pub enum FlowDecision {
+    Continue,                   // credit applied: just flush the queue
+    ResetStream(ErrorCode),     // RST_STREAM on frame.stream_id(), and cancel it in the queue
+    CloseConnection(ErrorCode), // GOAWAY with last_stream_id, then stop
+}
+
+pub fn on_window_update(frame: &Frame, queue: &mut SendQueue, last_stream_id: u32) -> FlowDecision {
+    let stream_id = frame.stream_id();
+
+    let increment = match parse_window_update(frame.payload()) {
+        Ok(increment) => increment,
+        Err(FlowError::Length) => return FlowDecision::CloseConnection(ErrorCode::FrameSizeError),
+        Err(error) => {
+            let error_code = ErrorCode::from(error);
+            if stream_id == 0 {
+                return FlowDecision::CloseConnection(error_code);
+            } else {
+                return FlowDecision::ResetStream(error_code);
+            }
+        }
+    };
+
+    if stream_id != 0 && stream_id > last_stream_id {
+        return FlowDecision::CloseConnection(ErrorCode::ProtocolError);
+    }
+
+    if let Err(error) = queue.increase(stream_id, increment) {
+        let error_code = ErrorCode::from(error);
+        if stream_id == 0 {
+            return FlowDecision::CloseConnection(error_code);
+        } else {
+            return FlowDecision::ResetStream(error_code);
+        }
+    };
+
+    return FlowDecision::Continue;
 }
 
 #[cfg(test)]
@@ -1022,6 +1085,52 @@ mod test {
             queue.increase(1, MAX_WINDOW_SIZE - 65_535).unwrap();
 
             assert_eq!(queue.set_initial_window(65_536), Err(FlowError::Overflow));
+        }
+
+        // --- 9.4 cancel: the stream was reset ---
+
+        #[test]
+        fn cancel_drops_the_queued_body() {
+            let mut queue = SendQueue::new();
+            queue.push(1, body(100));
+
+            queue.cancel(1);
+
+            assert!(queue.is_empty());
+            assert_eq!(queue.poll(MAX), vec![]);
+        }
+
+        #[test]
+        fn cancel_keeps_the_other_streams() {
+            let mut queue = SendQueue::new();
+            queue.push(1, body(100));
+            queue.push(3, b"abc".to_vec());
+
+            queue.cancel(1);
+
+            assert_eq!(sizes(&queue.poll(MAX)), vec![(3, 3)]);
+        }
+
+        // A blocked stream is cancelled: credit for it is ignored afterwards.
+        #[test]
+        fn cancelled_stream_sends_nothing_after_credit() {
+            let mut queue = exhausted();
+
+            queue.cancel(1);
+            queue.increase(0, 65_535).unwrap();
+
+            assert_eq!(queue.increase(1, 65_535), Ok(()));
+            assert_eq!(queue.poll(MAX), vec![]);
+        }
+
+        #[test]
+        fn cancel_of_an_unknown_stream_does_nothing() {
+            let mut queue = SendQueue::new();
+            queue.push(1, b"abc".to_vec());
+
+            queue.cancel(5);
+
+            assert_eq!(sizes(&queue.poll(MAX)), vec![(1, 3)]);
         }
     }
 }

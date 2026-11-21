@@ -66,6 +66,11 @@ impl Settings {
         self.max_frame_size
     }
 
+    // 9.4: the stream window size the peer gives us (§6.5.2).
+    pub fn initial_window_size(&self) -> u32 {
+        self.initial_window_size
+    }
+
     pub fn apply(&mut self, payload: &[u8]) -> Result<(), SettingsError> {
         let (chunks, remainder) = payload.as_chunks::<6>();
         if !remainder.is_empty() {
@@ -280,5 +285,19 @@ mod test {
                 "for {value}"
             );
         }
+    }
+
+    // --- 9.4 Flow control ---
+
+    #[test]
+    fn initial_window_size_defaults_to_65_535() {
+        assert_eq!(Settings::default().initial_window_size(), 65_535);
+    }
+
+    #[test]
+    fn initial_window_size_is_exposed() {
+        let settings = applied(&entry(0x4, 16_384)).unwrap();
+
+        assert_eq!(settings.initial_window_size(), 16_384);
     }
 }

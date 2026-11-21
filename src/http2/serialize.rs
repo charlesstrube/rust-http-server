@@ -45,7 +45,7 @@ fn encode_into_payloads(headers: Headers, payload: &mut Vec<u8>) {
     }
 }
 
-fn serialize_head(
+pub fn serialize_head(
     stream_id: u32,
     response: Response,
     max_frame_size: u32,

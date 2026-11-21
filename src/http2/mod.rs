@@ -15,8 +15,9 @@ use crate::{
         assembler::Assembler,
         connection::{Decision, handle_frame},
         error::{ErrorCode, goaway, rst_stream},
+        flow::{FlowDecision, SendQueue, on_settings, on_window_update, parse_window_update},
         frame::{Flags, Frame, FrameType, read_frame},
-        serialize::serialize_response,
+        serialize::serialize_head,
         settings::Settings,
     },
 };
@@ -45,13 +46,18 @@ fn send_frames(writer: &mut impl Write, frames: &[Frame]) -> bool {
 
 fn react(decision: Decision, last_stream_id: u32, mut writer: impl Write) -> bool {
     match decision {
-        Decision::Reply(frame) => writer.write_all(&frame.to_bytes()).is_ok(),
+        Decision::Reply(reply_frame) => writer.write_all(&reply_frame.to_bytes()).is_ok(),
         Decision::Continue => true,
         Decision::Close(code) => {
             fail_connection(&mut writer, last_stream_id, code);
             false
         }
     }
+}
+
+fn flush_queue(writer: &mut impl Write, queue: &mut SendQueue, max_frame_size: u32) -> bool {
+    let frames = queue.poll(max_frame_size);
+    send_frames(writer, &frames)
 }
 
 pub fn serve(
@@ -64,14 +70,18 @@ pub fn serve(
 
     let empty_frame = Frame::new(FrameType::Settings, Flags::empty(), 0, []);
 
+    let mut queue = SendQueue::default();
+
     if !send_frames(&mut writer, &[empty_frame]) {
         return;
     };
 
     // RFC 9113 §3.4: the client preface must be followed by a SETTINGS frame.
     match read_frame(&mut reader, local_settings.max_frame_size()) {
-        Ok(Some(frame)) if frame.frame_type() == FrameType::Settings => {
-            if !react(handle_frame(frame, &mut peer_settings), 0, &mut writer) {
+        Ok(Some(read_frame)) if read_frame.frame_type() == FrameType::Settings => {
+            let decision = on_settings(read_frame, &mut peer_settings, &mut queue);
+            let last_stream_id = 0;
+            if !react(decision, last_stream_id, &mut writer) {
                 return;
             }
         }
@@ -92,36 +102,76 @@ pub fn serve(
 
     loop {
         match read_frame(&mut reader, local_settings.max_frame_size()) {
-            Ok(Some(frame)) => {
-                match assembler.on_frame(&frame) {
+            Ok(Some(read_frame)) if read_frame.frame_type() == FrameType::WindowUpdate => {
+                match on_window_update(&read_frame, &mut queue, assembler.last_stream_id()) {
+                    FlowDecision::Continue => {
+                        if !flush_queue(&mut writer, &mut queue, peer_settings.max_frame_size()) {
+                            return;
+                        }
+                    }
+                    FlowDecision::ResetStream(code) => {
+                        send_frames(&mut writer, &[rst_stream(read_frame.stream_id(), code)]);
+                        queue.cancel(read_frame.stream_id());
+                        if !flush_queue(&mut writer, &mut queue, peer_settings.max_frame_size()) {
+                            return;
+                        }
+                    }
+                    FlowDecision::CloseConnection(code) => {
+                        fail_connection(&mut writer, assembler.last_stream_id(), code);
+                        return;
+                    }
+                }
+            }
+            Ok(Some(read_frame)) if read_frame.frame_type() == FrameType::Settings => {
+                let decision = on_settings(read_frame, &mut peer_settings, &mut queue);
+                if !react(decision, assembler.last_stream_id(), &mut writer) {
+                    return;
+                }
+
+                if !flush_queue(&mut writer, &mut queue, peer_settings.max_frame_size()) {
+                    return;
+                }
+            }
+            Ok(Some(read_frame)) => {
+                match assembler.on_frame(&read_frame) {
                     Ok(Some(assembled)) => {
                         let (stream_id, request) = assembled.into_parts();
                         let response = handler(&request);
 
-                        let frames =
-                            serialize_response(stream_id, response, peer_settings.max_frame_size());
+                        let (head, body) =
+                            serialize_head(stream_id, response, peer_settings.max_frame_size());
 
-                        if !send_frames(&mut writer, &frames) {
+                        if !send_frames(&mut writer, &head) {
                             return;
                         };
+
+                        queue.push(stream_id, body);
+
+                        if !flush_queue(&mut writer, &mut queue, peer_settings.max_frame_size()) {
+                            return;
+                        }
                     }
-                    Ok(None) => (),
+                    Ok(None) => {
+                        // if we get a reset stream, we need to cancel it
+                        if read_frame.frame_type() == FrameType::RstStream {
+                            queue.cancel(read_frame.stream_id());
+                        };
+                    }
                     Err(error) => {
                         if error.is_connection_error() {
-                            eprintln!("http2: {error}");
+                            eprintln!("http2 connection error: {error}");
                             fail_connection(&mut writer, assembler.last_stream_id(), error.code());
                             return;
                         }
 
-                        let frame_rst_stream = rst_stream(frame.stream_id(), error.code());
+                        let frame_rst_stream = rst_stream(read_frame.stream_id(), error.code());
                         if !send_frames(&mut writer, &[frame_rst_stream]) {
                             return;
                         };
                     }
-                };
-
+                }
                 if !react(
-                    handle_frame(frame, &mut peer_settings),
+                    handle_frame(read_frame, &mut peer_settings),
                     assembler.last_stream_id(),
                     &mut writer,
                 ) {
@@ -825,6 +875,294 @@ mod test {
         assert_eq!(
             responses(run_with(input, echo_path)),
             vec![server_goaway(ErrorCode::FrameSizeError)]
+        );
+    }
+
+    // --- Flow control: sending (step 9.4, RFC 9113 §5.2, §6.9) ---
+
+    use crate::http2::flow::window_update;
+
+    const MAX_WINDOW: u32 = 0x7FFF_FFFF;
+
+    // `/big` answers 100 000 bytes: more than the default window of 65 535.
+    // Any other path is echoed, a body small enough to never be blocked.
+    fn by_path(request: &Request) -> Response {
+        if request.path() == "/big" {
+            Response::new(StatusCode::Ok, Headers::default(), vec![0u8; 100_000])
+        } else {
+            echo_path(request)
+        }
+    }
+
+    // SETTINGS_INITIAL_WINDOW_SIZE (0x4) = size.
+    fn initial_window(size: u32) -> Vec<u8> {
+        let mut payload = vec![0x00, 0x04];
+        payload.extend_from_slice(&size.to_be_bytes());
+        payload
+    }
+
+    fn data_sizes(frames: &[Frame]) -> Vec<usize> {
+        frames
+            .iter()
+            .filter(|frame| frame.frame_type() == FrameType::Data)
+            .map(|frame| frame.payload().len())
+            .collect()
+    }
+
+    fn data_ends(frames: &[Frame]) -> Vec<bool> {
+        frames
+            .iter()
+            .filter(|frame| frame.frame_type() == FrameType::Data)
+            .map(|frame| frame.flags().contains(Flags::END_STREAM))
+            .collect()
+    }
+
+    // What the server writes for `get(1, "/big")` with the default windows.
+    const BLOCKED: [usize; 4] = [16_384, 16_384, 16_384, 16_383];
+
+    // HEADERS are not flow-controlled; DATA stops at 65 535 without END_STREAM.
+    #[test]
+    fn response_stops_at_the_default_window() {
+        let frames = responses(run_with(vec![settings([]), get(1, "/big")], by_path));
+
+        assert_eq!(frames[0].frame_type(), FrameType::Headers);
+        assert_eq!(frames[0].flags(), Flags::END_HEADERS);
+        assert_eq!(data_sizes(&frames), BLOCKED);
+        assert_eq!(data_ends(&frames), vec![false; 4]);
+    }
+
+    // The scenario of the explanation: the rest is 16 384 + 16 384 + 1 697.
+    #[test]
+    fn window_updates_resume_the_response() {
+        let input = vec![
+            settings([]),
+            get(1, "/big"),
+            window_update(0, 65_535),
+            window_update(1, 65_535),
+        ];
+        let frames = responses(run_with(input, by_path));
+
+        assert_eq!(
+            data_sizes(&frames),
+            vec![16_384, 16_384, 16_384, 16_383, 16_384, 16_384, 1_697]
+        );
+        assert_eq!(
+            data_ends(&frames),
+            vec![false, false, false, false, false, false, true]
+        );
+    }
+
+    #[test]
+    fn connection_update_alone_sends_nothing() {
+        let input = vec![
+            settings([]),
+            get(1, "/big"),
+            window_update(0, 65_535),
+            ping([1; 8]),
+        ];
+        let frames = responses(run_with(input, by_path));
+
+        assert_eq!(data_sizes(&frames), BLOCKED);
+        assert_eq!(frames.last(), Some(&ping_ack([1; 8])));
+    }
+
+    #[test]
+    fn stream_update_alone_sends_nothing() {
+        let input = vec![
+            settings([]),
+            get(1, "/big"),
+            window_update(1, 65_535),
+            ping([1; 8]),
+        ];
+        let frames = responses(run_with(input, by_path));
+
+        assert_eq!(data_sizes(&frames), BLOCKED);
+        assert_eq!(frames.last(), Some(&ping_ack([1; 8])));
+    }
+
+    // The client announces small stream windows in its first SETTINGS.
+    #[test]
+    fn client_initial_window_size_limits_the_response() {
+        let input = vec![settings(initial_window(16_384)), get(1, "/big")];
+        let frames = responses(run_with(input, by_path));
+
+        assert_eq!(data_sizes(&frames), vec![16_384]);
+    }
+
+    // §6.9.2: a new INITIAL_WINDOW_SIZE shifts a stream already waiting.
+    // 0 + (85 535 - 65 535) = 20 000 = 16 384 + 3 616.
+    #[test]
+    fn initial_window_size_change_unblocks_a_queued_response() {
+        let input = vec![
+            settings([]),
+            get(1, "/big"),
+            window_update(0, 100_000),
+            settings(initial_window(85_535)),
+        ];
+        let frames = responses(run_with(input, by_path));
+
+        assert_eq!(
+            data_sizes(&frames),
+            vec![16_384, 16_384, 16_384, 16_383, 16_384, 3_616]
+        );
+        assert!(frames.contains(&settings_ack()));
+    }
+
+    // The point of per-stream windows: stream 1 waits, stream 3 is answered.
+    #[test]
+    fn a_blocked_response_does_not_block_the_next_request() {
+        let input = vec![
+            settings([]),
+            get(1, "/big"),
+            window_update(0, 100_000),
+            get(3, "/three"),
+        ];
+        let frames = responses(run_with(input, by_path));
+
+        assert_eq!(frames.last(), Some(&data(3, Flags::END_STREAM, b"/three")));
+    }
+
+    // §6.4: after RST_STREAM, nothing more is sent on that stream.
+    #[test]
+    fn client_reset_drops_the_queued_body() {
+        let input = vec![
+            settings([]),
+            get(1, "/big"),
+            rst_stream(1, ErrorCode::Cancel),
+            window_update(0, 65_535),
+            window_update(1, 65_535),
+            ping([1; 8]),
+        ];
+        let frames = responses(run_with(input, by_path));
+
+        assert_eq!(data_sizes(&frames), BLOCKED);
+        assert!(!frames.iter().any(|frame| is_rst_stream(&frame)));
+        assert_eq!(frames.last(), Some(&ping_ack([1; 8])));
+    }
+
+    // --- Flow control errors (step 9.4, RFC 9113 §6.9) ---
+
+    // §6.9: a length other than 4 octets is a connection error, whatever the stream.
+    #[test]
+    fn window_update_of_the_wrong_size_closes_the_connection() {
+        let short = Frame::new(FrameType::WindowUpdate, Flags::empty(), 0, [0x00; 3]);
+        let input = vec![settings([]), short, ping([1; 8])];
+
+        assert_eq!(
+            responses(run_with(input, by_path)),
+            vec![server_goaway(ErrorCode::FrameSizeError)]
+        );
+    }
+
+    // §6.9: an increment of 0 on stream 0 is a connection error.
+    #[test]
+    fn zero_increment_on_the_connection_closes_it() {
+        let input = vec![settings([]), window_update(0, 0), ping([1; 8])];
+
+        assert_eq!(
+            responses(run_with(input, by_path)),
+            vec![server_goaway(ErrorCode::ProtocolError)]
+        );
+    }
+
+    // §6.9: an increment of 0 on a stream is a stream error: that stream only.
+    #[test]
+    fn zero_increment_on_a_stream_resets_it() {
+        let input = vec![
+            settings([]),
+            get(1, "/big"),
+            window_update(1, 0),
+            ping([1; 8]),
+        ];
+        let frames = responses(run_with(input, by_path));
+
+        assert_eq!(
+            frames[frames.len() - 2..],
+            [rst_stream(1, ErrorCode::ProtocolError), ping_ack([1; 8])]
+        );
+    }
+
+    // §6.9.1: 65 535 + 2^31 - 1 is above the maximum window.
+    #[test]
+    fn connection_window_overflow_closes_the_connection() {
+        let input = vec![settings([]), window_update(0, MAX_WINDOW), ping([1; 8])];
+
+        assert_eq!(
+            responses(run_with(input, by_path)),
+            vec![server_goaway(ErrorCode::FlowControlError)]
+        );
+    }
+
+    // §6.9.1: a stream window overflow is a stream error. The reset stream
+    // sends nothing more, even when the connection gets credit afterwards.
+    #[test]
+    fn stream_window_overflow_resets_the_stream() {
+        let input = vec![
+            settings([]),
+            get(1, "/big"),
+            window_update(1, MAX_WINDOW), // 0 + 2^31 - 1: still valid
+            window_update(1, 1),          // overflow
+            window_update(0, 100_000),
+            ping([1; 8]),
+        ];
+        let frames = responses(run_with(input, by_path));
+
+        assert_eq!(data_sizes(&frames), BLOCKED);
+        assert_eq!(
+            frames[frames.len() - 2..],
+            [rst_stream(1, ErrorCode::FlowControlError), ping_ack([1; 8])]
+        );
+    }
+
+    // §5.1: only HEADERS and PRIORITY may arrive on an idle stream.
+    #[test]
+    fn window_update_on_an_idle_stream_closes_the_connection() {
+        let input = vec![settings([]), window_update(1, 10), ping([1; 8])];
+
+        assert_eq!(
+            responses(run_with(input, by_path)),
+            vec![server_goaway(ErrorCode::ProtocolError)]
+        );
+    }
+
+    // §6.9: WINDOW_UPDATE can arrive just after END_STREAM was sent.
+    #[test]
+    fn window_update_on_a_closed_stream_is_ignored() {
+        let input = vec![
+            settings([]),
+            get(1, "/one"),
+            window_update(1, 10),
+            ping([1; 8]),
+        ];
+        let frames = responses(run_with(input, by_path));
+
+        assert!(!frames.iter().any(|frame| is_rst_stream(&frame)));
+        assert_eq!(frames.last(), Some(&ping_ack([1; 8])));
+    }
+
+    // §6.9.2: a new INITIAL_WINDOW_SIZE that pushes a stream window above
+    // 2^31 - 1 is a connection error, and the SETTINGS is not acknowledged.
+    #[test]
+    fn initial_window_size_overflow_closes_the_connection() {
+        let input = vec![
+            settings([]),
+            get(1, "/big"),
+            window_update(1, MAX_WINDOW), // 65 535 already sent: 0 + 2^31 - 1
+            settings(initial_window(65_536)), // + 1
+            ping([1; 8]),
+        ];
+        let frames = responses(run_with(input, by_path));
+
+        assert_eq!(
+            frames.last(),
+            Some(&goaway(1, ErrorCode::FlowControlError, &[]))
+        );
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|frame| **frame == settings_ack())
+                .count(),
+            0
         );
     }
 }
